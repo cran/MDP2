@@ -1,0 +1,89 @@
+---
+title: "The MDP2 package"
+author: "Lars Relund <lars@relund.dk>"
+date: "`r Sys.Date()`"
+bibliography: litt.bib
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{MDP2}
+  %\VignetteEncoding{UTF-8}
+  %\VignetteEngine{knitr::rmarkdown}
+editor_options: 
+  chunk_output_type: console
+---
+
+<style> 
+p {text-align: justify;} 
+//.sourceCode {background-color: white;}
+pre {
+  // border-style: solid;
+  // border-width: 1px;
+  // border-color: grey;
+  //background-color: grey !important;
+}
+img {
+   //width: 100%;
+   border: 0;
+}
+</style>
+
+<!-- scale math down -->
+<script type="text/x-mathjax-config"> 
+    MathJax.Hub.Config({ 
+        "HTML-CSS": { scale: 80 }
+        });
+</script>
+
+```{r setup, include=FALSE}
+library(knitr)
+options(rmarkdown.html_vignette.check_title = FALSE,
+        # formatR.arrow = TRUE, 
+        # scipen=999, 
+        # digits=5,
+        width=90) 
+#thm <- knit_theme$get("edit-kwrite")   # whitengrey, bright, print, edit-flashdevelop, edit-kwrite
+#knit_theme$set(thm)
+knitr::opts_chunk$set(
+   # collapse = TRUE,
+   comment = "#>",
+   fig.align = 'center',
+   fig.width = 9,
+   fig.height = 5,
+   fig.show = 'hold',
+   out.extra = 'style="max-width:100%;"',
+   # tidy = TRUE,
+   # prompt=T,
+   # comment=NA,
+   cache = F
+   # background = "red"
+)
+library(magrittr)
+library(dplyr)
+```
+
+
+The `MDP2` package in R is a package for solving Markov decision processes (MDPs) with discrete 
+time-steps, states and actions. Both traditional MDPs [@Puterman94], semi-Markov decision processes
+(semi-MDPs) [@Tijms03] and hierarchical-MDPs (HMDPs) [@Kristensen00] can be solved under a finite
+and infinite time-horizon.
+
+Building and solving an MDP is done in two steps. First, the MDP is built and saved in a set 
+of binary files. Next, you load the MDP into memory from the binary files and apply various
+algorithms to the model.
+
+The package implement well-known algorithms such as policy iteration and value iteration
+under different criteria e.g. average reward per time unit and expected total discounted reward. The
+model is stored using an underlying data structure based on the *state-expanded directed hypergraph*
+of the MDP (@Relund06) implemented in `C++` for fast running times. <!-- Under development is also
+support for MLHMP which is a Java implementation of algorithms for solving MDPs (@Kristensen03). 
+-->
+
+To illustrate the package capabilities have a look at the vignettes:
+
+   * Building MDP models `vignette("building")`.
+   * Solving an infinite-horizon MDP (semi-MDP) `vignette("infinite-mdp")`.
+   * Solving a finite-horizon MDP (semi-MDP) `vignette("finite-mdp")`.
+   * Solving an infinite-horizon HMDP `vignette("infinite-hmdp")`.
+
+
+## References
