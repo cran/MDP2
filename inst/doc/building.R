@@ -32,12 +32,12 @@ knitr::opts_chunk$set(
 library(MDP2)
 
 ## ----states-----------------------------------------------------------------------------
-N <- 5
-states <- tibble::tibble(
-      idx = 1:N - 1,
-      label = paste0("i = ", 1:N)
-   )
-states
+   N <- 5
+   states <- tibble::tibble(
+         idx = 1:N - 1,
+         label = paste0("i = ", 1:N)
+      )
+   states
 
 ## ---------------------------------------------------------------------------------------
 Cf <- -10
@@ -103,7 +103,7 @@ w$closeWriter() # close the binary files
 
 ## ----semi-mdp, echo=FALSE, results='hide', message=FALSE, fig.cap="Figure 1: The state-expanded hypergraph for the semi-MDP.", par=TRUE----
 mdp<-loadMDP("hct611-1_")
-plot(mdp, hyperarcColor = "label", marY = 0.06)
+plot(mdp, actionColor = "label", marY = 0.06)
 
 ## ----view_buldMDP1, ref.label='buildMDP1'-----------------------------------------------
 labels <- states$label
@@ -229,9 +229,9 @@ w$closeWriter()
 ## ----plotHgf3, echo=FALSE, fig.cap="Figure 2: A finite-horizon MDP", par=TRUE-----------
 scrapValues <- c(30, 10, 5, 0)   # scrap values (the values of the 4 states at stage 4)
 mdp <- loadMDP("machine1_", getLog = FALSE)
-plot(mdp, hyperarcColor = "label", radx = 0.06, marX = 0.065, marY = 0.055, nodeLabel = "sIdx:label")
+plot(mdp, actionColor = "label", radx = 0.06, marX = 0.065, marY = 0.055, stateLabel = "sIdx|label")
 
-## ---- echo=FALSE, fig.cap="Figure 3: The state-expanded hypergraph of the first stage of a hierarchical MDP. Level 0 indicate the founder level, and the nodes indicates states at the different levels. A child process (oval box) is represented using its state-expanded hypergraph (hyperarcs not shown) and is uniquely defined by a given state and action of its parent process."----
+## ----echo=FALSE, fig.cap="Figure 3: The state-expanded hypergraph of the first stage of a hierarchical MDP. Level 0 indicate the founder level, and the nodes indicates states at the different levels. A child process (oval box) is represented using its state-expanded hypergraph (hyperarcs not shown) and is uniquely defined by a given state and action of its parent process."----
 knitr::include_graphics("vignette_files/hmdp_index.png")
 
 ## ----Generate cow MDP functions,echo=TRUE-----------------------------------------------

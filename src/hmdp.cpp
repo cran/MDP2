@@ -1,13 +1,31 @@
 #include "hmdp.h"
 
+static vector<string> ParseBinaryStrings(const char * data, idx size) {
+    vector<string> labels;
+    string label;
+    for (idx i=0; i<size; ++i) {
+        if (data[i]=='\0') {
+            if (!label.empty()) {
+                labels.push_back(label);
+                label.clear();
+            }
+        } else {
+            label.push_back(data[i]);
+        }
+    }
+    if (!label.empty()) labels.push_back(label);
+    return labels;
+}
+
 void HMDP::LoadBin(string stateIdxFile, string stateIdxLblFile, string actionIdxFile,
     string actionIdxLblFile, string actionWFile,  string actionWLblFile,
-    string transProbFile, string externalFile)
+    string transProbFile, string externalFile, string transWFile, string transWLblFile)
 {
     okay = true;
     externalProc = false;
     HMDPReader reader(stateIdxFile, stateIdxLblFile, actionIdxFile,
-        actionIdxLblFile, actionWFile, actionWLblFile, transProbFile, externalFile, this, log);
+        actionIdxLblFile, actionWFile, actionWLblFile, transProbFile, externalFile,
+        transWFile, transWLblFile, this, log);
     if (!reader.okay) okay = false;
     else if (external.size()>0) {
         externalProc = true;
@@ -17,16 +35,142 @@ void HMDP::LoadBin(string stateIdxFile, string stateIdxLblFile, string actionIdx
 
 // -----------------------------------------------------------------------------
 
+HMDPBuilder::HMDPBuilder(bool verbose_)
+{
+    pHMDP = new HMDP(verbose_);
+    reader.pHMDP = pHMDP;
+    reader.okay = true;
+    reader.foundScp3 = false;
+    closed = false;
+    released = false;
+}
+
+// -----------------------------------------------------------------------------
+
+HMDPBuilder::~HMDPBuilder()
+{
+    if (!released && pHMDP!=NULL) {
+        delete pHMDP;
+        pHMDP = NULL;
+    }
+}
+
+// -----------------------------------------------------------------------------
+
+void HMDPBuilder::SetWeights(vector<string> labels)
+{
+    if (closed) throw runtime_error("memoryMDPWriter is closed.");
+    pHMDP->SetActionWeightNames(labels);
+}
+
+// -----------------------------------------------------------------------------
+
+void HMDPBuilder::SetTransWeights(vector<string> labels)
+{
+    if (closed) throw runtime_error("memoryMDPWriter is closed.");
+    pHMDP->SetTransWeightNames(labels);
+}
+
+// -----------------------------------------------------------------------------
+
+idx HMDPBuilder::AddState(vector<idx> index, string label)
+{
+    if (closed) throw runtime_error("memoryMDPWriter is closed.");
+    if (index.empty()) throw runtime_error("State index must not be empty.");
+    HMDPReader::TmpState state;
+    state.iHMDP = index;
+    state.label = label;
+    reader.stateVec.push_back(state);
+    pHMDP->levels = MAX(pHMDP->levels, (int)(index.size()/3 + 1));
+    return reader.stateVec.size()-1;
+}
+
+// -----------------------------------------------------------------------------
+
+void HMDPBuilder::AddAction(idx stateRowId, vector<idx> scope, vector<idx> id,
+    vector<flt> pr, vector<flt> weights, vector<flt> transWeights, string label)
+{
+    if (closed) throw runtime_error("memoryMDPWriter is closed.");
+    if (stateRowId>=reader.stateVec.size()) throw runtime_error("Action state row id does not exist.");
+    if (scope.size()!=id.size()) throw runtime_error("Action scope and id vectors must have the same length.");
+    if (scope.size()!=pr.size()) throw runtime_error("Action transition probability length must match scope and id.");
+    if (weights.size()!=pHMDP->weightActionNames.size()) {
+        throw runtime_error("Action weight length must match the number of action weight labels.");
+    }
+    idx transWeightCount = pHMDP->weightTransNames.size();
+    if (transWeightCount>0 && transWeights.size()!=pr.size()*transWeightCount) {
+        throw runtime_error("Transition weight length must equal transitions times transition weight labels.");
+    }
+    if (transWeightCount==0 && transWeights.size()>0) {
+        throw runtime_error("Transition weights were supplied but no transition weight labels were set.");
+    }
+
+    HMDPReader::TmpAction action;
+    action.sId = stateRowId;
+    action.scp = scope;
+    action.index = id;
+    action.pr = pr;
+    action.w = weights;
+    action.label = label;
+    action.transW.resize(pr.size());
+    if (transWeightCount>0) {
+        for (idx i=0; i<pr.size(); ++i) {
+            for (idx j=0; j<transWeightCount; ++j) {
+                action.transW[i].push_back(transWeights[i*transWeightCount+j]);
+            }
+        }
+    }
+    reader.stateVec[stateRowId].actions.push_back(action);
+}
+
+// -----------------------------------------------------------------------------
+
+HMDP* HMDPBuilder::Close()
+{
+    if (closed) throw runtime_error("memoryMDPWriter is already closed.");
+    closed = true;
+    pHMDP->ResetLog();
+    pHMDP->okay = true;
+    pHMDP->externalProc = false;
+    reader.okay = true;
+    if (reader.stateVec.empty()) {
+        pHMDP->okay = false;
+        pHMDP->log << "No states have been added to the HMDP." << endl;
+    } else {
+        reader.timer.StartTimer();
+        reader.Compile();
+        reader.timer.StopTimer();
+        pHMDP->log << "Build the HMDP from memory (" << reader.timer.ElapsedTime("sec") << " sec.)" << endl;
+        if (!reader.okay) pHMDP->okay = false;
+    }
+    vector<HMDPReader::TmpState>().swap(reader.stateVec);
+    reader.stagesMap.clear();
+    released = true;
+    return pHMDP;
+}
+
+// -----------------------------------------------------------------------------
+
+string HMDPBuilder::GetLog()
+{
+    if (pHMDP==NULL) return string();
+    return pHMDP->GetLog();
+}
+
+// -----------------------------------------------------------------------------
+
 HMDPReader::HMDPReader(string stateIdxFile, string stateIdxLblFile, string actionIdxFile,
     string actionIdxLblFile, string actionWFile, string actionWLblFile,
-    string transProbFile, string externalFile, HMDP *pHMDP, ostringstream & hmdpLog)
+    string transProbFile, string externalFile, string transWFile, string transWLblFile,
+    HMDP *pHMDP, ostringstream & hmdpLog)
 {
     pHMDP->ResetLog();
     okay = true;
     this->pHMDP = pHMDP;
     timer.StartTimer();
     AddStates(stateIdxFile, stateIdxLblFile);
-    AddActions(actionIdxFile, actionIdxLblFile, actionWFile, actionWLblFile, transProbFile);
+    AddActions(actionIdxFile, actionIdxLblFile, actionWFile, actionWLblFile, transProbFile,
+        transWFile, transWLblFile);
     AddExternal(externalFile);
     timer.StopTimer();
     pHMDP->log << "Read binary files (" << timer.ElapsedTime("sec") << " sec.)" << endl;
@@ -38,11 +182,21 @@ HMDPReader::HMDPReader(string stateIdxFile, string stateIdxLblFile, string actio
 
 // -----------------------------------------------------------------------------
 
+HMDPReader::HMDPReader()
+{
+    okay = true;
+    foundScp3 = false;
+    pHMDP = NULL;
+}
+
+// -----------------------------------------------------------------------------
+
 
 template <class T>
 idx HMDPReader::ReadBinary(string fileName, T *&p) {
 	ifstream::pos_type fileSize;
 	ifstream file;
+	p = NULL;
 
 	// read idx
 	file.open(fileName.c_str() ,ios::in|ios::binary|ios::ate);    // open binary file for reading with pointer at end of file to get filesize
@@ -52,6 +206,10 @@ idx HMDPReader::ReadBinary(string fileName, T *&p) {
 	}
 	fileSize = file.tellg();
 	idx size = fileSize/sizeof(T);
+	if (size==0) {
+		file.close();
+		return(0);
+	}
 	p = new T[size];
 	file.seekg (0, ios::beg);   // set pointer to start of file
 	file.read((char *)p,fileSize);
@@ -96,15 +254,7 @@ void HMDPReader::AddStates(string stateIdxFile, string stateIdxLblFile) {
 	// fix bug show no labels okay
 	if (lblSize==0) {return;}
 	// add labels to a string vector
-	vector<string> labels;
-	char * ptr = lbl;
-	for (int i=0;;++i) {
-		//cout << ptr << endl;
-		labels.push_back(ptr);
-		ptr = strrchr(ptr,'\0');
-		if ( (ptr==0) | (ptr-lbl>=(int)lblSize) ) break;
-		++ptr;
-	}
+	vector<string> labels = ParseBinaryStrings(lbl, lblSize);
 	delete [] lbl;
 
 	// move labels to states
@@ -118,15 +268,18 @@ void HMDPReader::AddStates(string stateIdxFile, string stateIdxLblFile) {
 // -----------------------------------------------------------------------------
 
 void HMDPReader::AddActions(string actionIdxFile, string actionIdxLblFile,
-	string actionWFile, string actionWLblFile, string transProbFile)
+	string actionWFile, string actionWLblFile, string transProbFile,
+    string transWFile, string transWLblFile)
 {
 	ifstream::pos_type fileSize;
 	ifstream file;
-	int * aIdx;    // raw idx data
-	char * lbl;    // raw labels
-	double * aW;
-	char * wLbl;
-	double * tPr;
+	int * aIdx = NULL;    // raw idx data
+	char * lbl = NULL;    // raw labels
+	double * aW = NULL;
+	char * wLbl = NULL;
+	double * tPr = NULL;
+    double * tW = NULL;
+    char * tWLbl = NULL;
 	vector<TmpAction> actionVec;  // Vector of all action with actionVec[aId] according to file definitions.
 	foundScp3 = false;
 
@@ -135,26 +288,53 @@ void HMDPReader::AddActions(string actionIdxFile, string actionIdxLblFile,
 	idx aWSize = ReadBinary(actionWFile,aW);
 	idx wLblSize = ReadBinary(actionWLblFile,wLbl);
 	idx tPrSize = ReadBinary(transProbFile,tPr);
-	// note that all arrays (except the label arrays) have the same number of rows (same number of -1's).
-   // if ( (aIdxSize==0) | (lblSize==0) | (aWSize==0) | (wLblSize==0) | (tPrSize==0) ) {okay = false; return;}
-   // fix bug such that an mdp with no labels okay
-   if ( (aIdxSize==0) | (aWSize==0) | (wLblSize==0) | (tPrSize==0) ) {okay = false; return;}
-    
-
+    idx tWSize = 0;
+    idx tWLblSize = 0;
+    if (transWFile.length()>0 && transWLblFile.length()>0) {
+        ifstream transWTest(transWFile.c_str(), ios::in|ios::binary);
+        ifstream transWLblTest(transWLblFile.c_str(), ios::in|ios::binary);
+        if (transWTest && transWLblTest) {
+            transWTest.close();
+            transWLblTest.close();
+            tWSize = ReadBinary(transWFile,tW);
+            tWLblSize = ReadBinary(transWLblFile,tWLbl);
+        }
+	}
 	// add weight labels to HMDP
 	vector<string> labels;
-	char * ptr;
-	ptr = wLbl;
-	for (int i=0;;++i) {
-		labels.push_back(ptr);
-		ptr = strrchr(ptr,'\0');
-		if ( (ptr==0) | (ptr-wLbl>=(int)wLblSize) ) break;
-		++ptr;
+	if (wLblSize>0) {
+		labels = ParseBinaryStrings(wLbl, wLblSize);
 	}
-	labels.pop_back();  // the last element is a dummy
 	pHMDP->SetActionWeightNames(labels);
 	wLblSize = labels.size();   // number of weights
 	delete [] wLbl;
+
+    idx transWLblCount = 0;
+    if (tWLblSize>0) {
+        labels = ParseBinaryStrings(tWLbl, tWLblSize);
+        pHMDP->SetTransWeightNames(labels);
+        transWLblCount = labels.size();
+        delete [] tWLbl;
+    } else {
+        pHMDP->SetTransWeightNames(vector<string>());
+    }
+
+	// Models with states and no actions are valid. In that case the action,
+	// action-weight and transition-probability files are empty, but weight label
+	// files may still define the model's weight names.
+	if (aIdxSize==0 && aWSize==0 && tPrSize==0) {
+		delete [] aIdx;
+		delete [] lbl;
+		delete [] aW;
+		delete [] tPr;
+		delete [] tW;
+		return;
+	}
+
+	// Note that all action arrays have the same number of rows (same number of
+	// -1 row terminators). If one of the required action files is empty while
+	// others contain data, the binary model is malformed.
+	if (aIdxSize==0 || tPrSize==0) {okay = false; return;}
 
     // scan aIdx
 	vector<idx> a;  // vector of index
@@ -182,13 +362,19 @@ void HMDPReader::AddActions(string actionIdxFile, string actionIdxLblFile,
 	}
     delete [] aIdx;
 
+	if (wLblSize>0 && aWSize<actionVec.size()*wLblSize) {
+		throw runtime_error("Action weight file has fewer values than required by the action weight labels.");
+	}
+
 	// scan aW
 	vector<double> b;  // vector of doubles
 	idx aId;
 	for(aId=0; aId<actionVec.size(); aId++) {
-		b.assign(aW + aId*wLblSize, aW + (aId+1)*wLblSize);
-		for (idx j=0;j<b.size();j++) {
-			actionVec[aId].w.push_back((flt)b[j]);
+		if (wLblSize>0) {
+			b.assign(aW + aId*wLblSize, aW + (aId+1)*wLblSize);
+			for (idx j=0;j<b.size();j++) {
+				actionVec[aId].w.push_back((flt)b[j]);
+			}
 		}
 	}
 	delete [] aW;
@@ -208,18 +394,37 @@ void HMDPReader::AddActions(string actionIdxFile, string actionIdxLblFile,
 	}
 	delete [] tPr;
 
+    if (tWSize>0 && transWLblCount>0) {
+        prev=0;
+        aId = 0;
+        for(idx i=0; i<tWSize; i++) {
+            if (tW[i]== -1) {
+                b.assign(tW+prev, tW+i);
+                idx transCount = actionVec[aId].pr.size();
+                if (b.size() != transCount * transWLblCount) {
+                    throw runtime_error("Transition weight row length does not match transitions times transition weight names.");
+                }
+                actionVec[aId].transW.resize(transCount);
+                for (idx t=0; t<transCount; ++t) {
+                    for (idx j=0; j<transWLblCount; ++j) {
+                        actionVec[aId].transW[t].push_back((flt)b[t*transWLblCount+j]);
+                    }
+                }
+                prev=i+1;
+                aId++;
+            }
+        }
+        delete [] tW;
+    } else {
+        for(aId=0; aId<actionVec.size(); aId++) {
+            actionVec[aId].transW.resize(actionVec[aId].pr.size());
+        }
+    }
+
 	// scan lbl
 	// fix bug such that an mdp with no labels okay
 	if (lblSize>0) {
-   	labels.clear();
-   	ptr = lbl;
-   	for (int i=0;;++i) {
-   		labels.push_back(ptr);
-   		ptr = strrchr(ptr,'\0');
-   		if ( (ptr==0) | (ptr-lbl>=(int)lblSize) ) break;
-   		++ptr;
-   	}
-   	labels.pop_back();  // the last element is a dummy
+   	labels = ParseBinaryStrings(lbl, lblSize);
    	// add labels to actions
    	for(idx i=0;i<labels.size();++i) {
    		if (i % 2 == 0) from_string<idx>(aId, labels[i], std::dec); // if i is even
@@ -270,11 +475,48 @@ void HMDPReader::Compile() {
 			s.pop_back();
 		}
 	}
+
+    bool hasActions = false;
+    for (idx sId=0; sId<stateVec.size(); ++sId) {
+        if (stateVec[sId].actions.size()>0) {
+            hasActions = true;
+            break;
+        }
+    }
+    if (!hasActions) {
+        vector<string> keys;
+        set<string> keySet;
+        pair<set<string>::iterator, bool> ret;
+        for (idx sId=stateVec.size(); sId>0; --sId) {
+            string str = pHMDP->GetStageStr(stateVec[sId-1].iHMDP);
+            ret = keySet.insert(str);
+            if (ret.second==true) keys.push_back(str);
+        }
+        pair< multimap<string, int >::iterator, multimap<string, int >::iterator > pairS;
+        multimap<string, int>::iterator ite;
+        for (idx i=0; i<keys.size(); i++) {
+            pairS = stagesMap.equal_range(keys[i]);
+            idx sSize;
+            idx firstSId = pHMDP->states.size();
+            for (ite=pairS.first, sSize = 0; ite!=pairS.second; ++ite, ++sSize) {
+                idx sId = ite->second;
+                pHMDP->states.push_back(HMDPState(stateVec[sId].label));
+            }
+            pHMDP->stages[keys[i]] = pair<idx,idx>(firstSId, sSize);
+        }
+        return;
+    }
+
     // set state ids which are stored in idx of an action
     cpu.StartTimer();
     foundScp3 = false;
     for (idx sId=0; sId<stateVec.size(); ++sId) {
-        SetSIds(sId, foundScp3);
+        if (!SetSIds(sId, foundScp3)) {
+            okay = false;
+            cpu.StopTimer();
+            if (pHMDP->verbose) {pHMDP->log << "  Transform actions to internal data structure (" << cpu.ElapsedTime("sec") << " sec.)\n";}
+            return;
+        }
     }
     cpu.StopTimer();
     if (pHMDP->verbose) {pHMDP->log << "  Transform actions to internal data structure (" << cpu.ElapsedTime("sec") << " sec.)\n";}
@@ -314,7 +556,7 @@ void HMDPReader::Compile() {
             sIte = pHMDP->state_end()-1;
             for (idx j=0; j<stateVec[sId].actions.size(); ++j) {
                 TmpAction & a = stateVec[sId].actions[j];
-                sIte->AddAction(a.w, a.index, a.pr, a.label);
+                sIte->AddAction(a.w, a.index, a.pr, a.transW, a.label);
             }
         }
         pHMDP->stages[keys[i]] = pair<idx,idx>(firstSId, sSize);    // store first state id of stage
@@ -338,7 +580,7 @@ void HMDPReader::Compile() {
 
 // -----------------------------------------------------------------------------
 
-void HMDPReader::SetSIds(const idx & iState, bool & findValidOdr) {
+bool HMDPReader::SetSIds(const idx & iState, bool & findValidOdr) {
 	bool up, next;    // where do the actions go
 	idx iS = 0;
 	int level = pHMDP->GetLevel(stateVec[iState].iHMDP);
@@ -372,31 +614,79 @@ void HMDPReader::SetSIds(const idx & iState, bool & findValidOdr) {
 		for (idx j=0; j<index.size(); j++) {
 			if (scp[j]==1) { // next stage
 				if (level==pHMDP->levels-1) {    // ASSUME states at a stage are defined in sequence. TODO: This may be dangerous does it always hold!!
+                    if (pairNext.first==pairNext.second) {
+                        pHMDP->log << "Error: State " << stateVec[iState].label << " (id = " << iState << "). Action "
+                            << stateVec[iState].actions[a].label << " (" << a << ") has a transition to a non-existing state "
+                            << "with scope " << scp[j] << " and id " << index[j] << "!" << endl;
+                        return false;
+                    }
                     iS = pairNext.first->second + index[j];
+                    if (iS>=stateVec.size() || pHMDP->GetStageStr(stateVec[iS].iHMDP)!=stageNext) {
+                        pHMDP->log << "Error: State " << stateVec[iState].label << " (id = " << iState << "). Action "
+                            << stateVec[iState].actions[a].label << " (" << a << ") has a transition to a non-existing state "
+                            << "with scope " << scp[j] << " and id " << index[j] << "!" << endl;
+                        return false;
+                    }
 				}
 				else {
                     ite = pairNext.first;
-                    for (idx i=0; i<index[j]; i++) ++ite;      // TODO This is very slow for stages with many states!! e.g. a ordinary big MDP. Current hack define your MDP using scp 3
+                    for (idx i=0; i<index[j] && ite!=pairNext.second; i++) ++ite;      // TODO This is very slow for stages with many states!! e.g. a ordinary big MDP. Current hack define your MDP using scp 3
+                    if (ite==pairNext.second) {
+                        pHMDP->log << "Error: State " << stateVec[iState].label << " (id = " << iState << "). Action "
+                            << stateVec[iState].actions[a].label << " (" << a << ") has a transition to a non-existing state "
+                            << "with scope " << scp[j] << " and id " << index[j] << "!" << endl;
+                        return false;
+                    }
                     iS = ite->second;
 				}
 			}
 			if (scp[j]==0) { // next father stage
 				ite = pairUp.first;
-				for (idx i=0; i<index[j]; i++) ++ite;
+				for (idx i=0; i<index[j] && ite!=pairUp.second; i++) ++ite;
+                if (ite==pairUp.second) {
+                    pHMDP->log << "Error: State " << stateVec[iState].label << " (id = " << iState << "). Action "
+                        << stateVec[iState].actions[a].label << " (" << a << ") has a transition to a non-existing state "
+                        << "with scope " << scp[j] << " and id " << index[j] << "!" << endl;
+                    return false;
+                }
 				iS = ite->second;
 			}
 			if (scp[j]==2) { // next child stage
                 stageNextChild = pHMDP->GetNextChildStageStr(stateVec[iState].iHMDP, a);
                 pair< multimap<string, int >::iterator, multimap<string, int >::iterator > pairDown = stagesMap.equal_range(stageNextChild);
                 if (level+1==pHMDP->levels-1) { // check if child stage at lowest level -> states at a stage are defined in sequence.
+                    if (pairDown.first==pairDown.second) {
+                        pHMDP->log << "Error: State " << stateVec[iState].label << " (id = " << iState << "). Action "
+                            << stateVec[iState].actions[a].label << " (" << a << ") has a transition to a non-existing state "
+                            << "with scope " << scp[j] << " and id " << index[j] << "!" << endl;
+                        return false;
+                    }
                     iS = pairDown.first->second + index[j];
+                    if (iS>=stateVec.size() || pHMDP->GetStageStr(stateVec[iS].iHMDP)!=stageNextChild) {
+                        pHMDP->log << "Error: State " << stateVec[iState].label << " (id = " << iState << "). Action "
+                            << stateVec[iState].actions[a].label << " (" << a << ") has a transition to a non-existing state "
+                            << "with scope " << scp[j] << " and id " << index[j] << "!" << endl;
+                        return false;
+                    }
                 } else {
                     ite = pairDown.first;
-                    for (idx i=0; i<index[j]; i++) ++ite;      // TODO This is very slow for stages with many states!! e.g. a ordinary big MDP. Current hack define your MDP using scope 3
+                    for (idx i=0; i<index[j] && ite!=pairDown.second; i++) ++ite;      // TODO This is very slow for stages with many states!! e.g. a ordinary big MDP. Current hack define your MDP using scope 3
+                    if (ite==pairDown.second) {
+                        pHMDP->log << "Error: State " << stateVec[iState].label << " (id = " << iState << "). Action "
+                            << stateVec[iState].actions[a].label << " (" << a << ") has a transition to a non-existing state "
+                            << "with scope " << scp[j] << " and id " << index[j] << "!" << endl;
+                        return false;
+                    }
                     iS = ite->second;
-				}
+                }
 			}
 			if (scp[j]==3) { // specify state index/id
+                if (index[j]>=stateVec.size()) {
+                    pHMDP->log << "Error: State " << stateVec[iState].label << " (id = " << iState << "). Action "
+                        << stateVec[iState].actions[a].label << " (" << a << ") has a transition to a non-existing state "
+                        << "with scope " << scp[j] << " and id " << index[j] << "!" << endl;
+                    return false;
+                }
 				iS = index[j];
 				findValidOdr = true;    // possible that have to create new valid ordering.
 			}
@@ -406,6 +696,7 @@ void HMDPReader::SetSIds(const idx & iState, bool & findValidOdr) {
         //cout << "(iS,iA) = (" << iState << "," << a << ") tails: " << vec2String(stateVec[iState].actions[a].index) << endl;
         stateVec[iState].actions[a].scp.clear();
 	}
+    return true;
 }
 
 // -----------------------------------------------------------------------------
@@ -416,17 +707,11 @@ void HMDPReader::AddExternal(string externalFile) {
     idx lblSize = ReadBinary<char>(externalFile,lbl);
     if (lblSize==0) return;   // no external processes
 
-    char * ptr = lbl;
-    for (int i=0;;++i) {
-        stageStr = ptr;
-        ptr = strrchr(ptr,'\0');
-        if ( (ptr==0) | (ptr-lbl>=(int)lblSize) ) break;
-        ++ptr;
-        prefix = ptr;
+    vector<string> labels = ParseBinaryStrings(lbl, lblSize);
+    for (idx i=0; i+1<labels.size(); i += 2) {
+        stageStr = labels[i];
+        prefix = labels[i+1];
         pHMDP->external[stageStr] = prefix;
-        ptr = strrchr(ptr,'\0');
-        if ( (ptr==0) | (ptr-lbl>=(int)lblSize) ) break;
-        ++ptr;
     }
     delete [] lbl;
     // showing contents:
@@ -492,7 +777,8 @@ string HMDP::Print() {
 	out << "HMDP with " << levels << " level(s), time-horizon: ";
 	if (timeHorizon>=INFINT) out << "infinite";
 	else out << timeHorizon << " (finite)";
-	out << endl << "Weights: " << vec2String(weightNames) << endl;
+	out << endl << "Action weights: " << vec2String(weightActionNames) << endl;
+    out << "Transition weights: " << vec2String(weightTransNames) << endl;
 	for (stage_iterator ite = stage_begin(); ite!=stage_end(); ++ite) {
         idx iS = ite->second.first;
         idx sizeS = ite->second.second;
@@ -550,7 +836,7 @@ void HMDP::ExternalResetStates() {
 
 // ----------------------------------------------------------------------------
 
-bool HMDP::ExternalStatesUpdate(Crit crit, state_iterator iteS, string & curPrefix, HMDPPtr & pExt,
+bool HMDP::ExternalStatesUpdate(BellmanOp op, OptSense sense, state_iterator iteS, string & curPrefix, HMDPPtr & pExt,
      const idx & idxW, const idx & idxD, const flt & g, const flt & discountF)
 {
     //cout << "ExtStatesU: idxD=" << idxD << endl;
@@ -559,10 +845,10 @@ bool HMDP::ExternalStatesUpdate(Crit crit, state_iterator iteS, string & curPref
     ExternalAllocteMem(pExt, prefix, curPrefix);
     if (!okay) return false;
     string stageNextStr = GetNextStageStr(stageStr);  // external stage in HMDP corresponding to last stage in external
-    vector<flt> rewards = GetStageW(stageNextStr);   // get the rewards from external nodes corresponding to last stage //cout << "next stage: " << stageNextStr << endl; //cout << "Start valueIte\n";
-    pExt->ValueIte(crit, 1, 0, idxW, idxD, rewards, g, discountF);
+    vector<flt> weights = GetStageW(stageNextStr);   // get the weights from external nodes corresponding to last stage //cout << "next stage: " << stageNextStr << endl; //cout << "Start valueIte\n";
+    pExt->ValueIte(op, sense, 1, 0, idxW, idxD, weights, g, discountF);
     string stageZeroExtStr = "0"; // first stage in external //cout << "Copy from external:" << endl;
-    ExternalCopyWState(stageStr, stageZeroExtStr, pExt, false);   // copy rewards to the HMDP //cout << "Update actions:" << endl;
+    ExternalCopyWState(stageStr, stageZeroExtStr, pExt, false);   // copy weights to the HMDP //cout << "Update actions:" << endl;
     bool newPred = ExternalSetActions(stageStr, pExt, idxW, idxD);
     return newPred;
 }
@@ -615,9 +901,9 @@ bool HMDP::ExternalSetActions(string stageStr, const HMDPPtr & pExt, const idx &
     string stageZeroExtStr = "0";
     string stageNextStr = GetNextStageStr(stageStr);
 	bool newPolicy = false;
-	// rewards
+	// weights
 	pExt->SetStateWStage(stageLastExtStr,0);  // reset weights
-	pExt->CalcPolicy(Reward,idxW);
+	pExt->CalcPolicy(BellmanOp::Expected,idxW);
     for (state_iterator iteTo = state_begin(stageStr), iteFrom=pExt->state_begin(stageZeroExtStr);
          iteTo!=state_end(stageStr); ++iteTo, ++iteFrom)
     {
@@ -626,7 +912,7 @@ bool HMDP::ExternalSetActions(string stageStr, const HMDPPtr & pExt, const idx &
     }
     // durations
     pExt->SetStateWStage(stageLastExtStr,0);  // reset weights
-    pExt->CalcPolicy(Reward,idxD);  // calc durations of external actions
+    pExt->CalcPolicy(BellmanOp::Expected,idxD);  // calc durations of external actions
     for (state_iterator iteTo = state_begin(stageStr), iteFrom=pExt->state_begin(stageZeroExtStr);
          iteTo!=state_end(stageStr); ++iteTo, ++iteFrom)
     {
@@ -641,7 +927,7 @@ bool HMDP::ExternalSetActions(string stageStr, const HMDPPtr & pExt, const idx &
         idx id = GetId(iteN);
 		w(iteL) = 1;
 		if (iteL!=state_begin(stageLastExtStr)) w(iteL-1) = 0;   // restore previous
-        pExt->CalcPolicy(TransPr);
+        pExt->CalcPolicy(BellmanOp::TransPr);
         for (state_iterator iteTo = state_begin(stageStr), iteFrom=pExt->state_begin(stageZeroExtStr);
              iteTo!=state_end(stageStr); ++iteTo, ++iteFrom)
         {
@@ -655,169 +941,185 @@ bool HMDP::ExternalSetActions(string stageStr, const HMDPPtr & pExt, const idx &
 
 //-----------------------------------------------------------------------------
 
-flt HMDP::PolicyIte(Crit crit, uSInt maxIte, const idx idxW, const idx idxD, const flt discountF) {
+flt HMDP::PolicyIte(BellmanOp op, OptSense sense, uSInt maxIte, const idx idxW, const idx idxD, const flt discountF) {
 	//cout << "PolicyIte: idxD=" << idxD << endl;
 	ResetLog();
+    ValidateGlobalWeightForOp(op, idxW);
 	if (timeHorizon<INFINT) {
 		log << "Policy iteration can only be done on infinite time-horizon HMDPs!" << endl;
 		return -INF;
 	}
     log << "Run policy iteration ";
-	switch (crit) {
-        case AverageReward: log << "under average reward criterion using \nreward '" <<
+	switch (op) {
+        case BellmanOp::Average: log << "under average expected-weight Bellman operator using \nweight '" <<
             GetWName(idxW) << "' over '" << GetWName(idxD) << "'. Iterations (g): " << endl;
             break;
-        case DiscountedReward: log << "using quantity '" << GetWName(idxW)
-            << "' under discounting criterion \nwith '" << GetWName(idxD)
+        case BellmanOp::Discounted: log << "using weight '" << GetWName(idxW)
+            << "' under discounted expected-weight Bellman operator \nwith '" << GetWName(idxD)
             << "' as duration using discount factor " << discountF
             << ". \nIteration(s): ";
             break;
-        default: log << "Criterion not defined for policy iteration!" << endl; return -INF;
+        default: log << "Bellman operator not defined for policy iteration!" << endl; return -INF;
 	}
-	MatAlg matAlg; // Matrix routines
 	ExternalResetActions(idxW, idxD);
 	timer.StartTimer();
 	SetStateWStage("1", (flt)0);
 	int rows = GetStateSize("0");
-	MatSimple<double> r(rows,1),   // Matrix of founder rewards
-				   w(rows,1),      // Matrix of weights (the unknown)
-				   d(rows,1),      // Matrix of denominator values
-				   P(rows,rows);   // Matrix of prob values
-	MatSimple<double> I(rows,true); // identity
+	arma::vec r(rows),   // Vector of founder weights
+              w(rows),   // Vector of weights (the unknown)
+              d(rows);   // Vector of denominator values
+	arma::mat P(rows, rows); // Matrix of prob values
 	flt g = 0;
 	okay = true;
 	bool newPred;
 	SetPred(0); // default policy
-	if (externalProc) CalcOptPolicy(crit, idxW, g, idxD, discountF);   // if external processes we have to find the optimal policy of the external processes and set external action w and trans pr
+	if (externalProc) CalcOptPolicy(op, sense, idxW, g, idxD, discountF);   // if external processes we have to find the optimal policy of the external processes and set external action w and trans pr
 	for (idx k=1; ; ++k) { //cout << endl << "IteP:" << k << endl;
 		if (verbose) log << endl; 
 		log << k << " "; 
 		if (verbose) log << endl;
-		// find rewards, dur, trans pr at founder given policy
-		if (crit==AverageReward) {
-            FounderW(Reward, r, idxW);
-            FounderPr(TransPr,P);
-            FounderW(Reward, d, idxD);
+		// find weights, dur, trans pr at founder given policy
+		if (op==BellmanOp::Average) {
+            FounderW(BellmanOp::Expected, r, idxW);
+            FounderPr(BellmanOp::TransPr,P);
+            FounderW(BellmanOp::Expected, d, idxD);
         }
         else {
-            FounderW(crit, r, idxW,g,idxD,discountF); //cout << "r mat: " << r << endl;
-            FounderPr(TransPrDiscounted,P,idxD,discountF); //cout << "P mat: " << P << endl;
+            FounderW(op, r, idxW,g,idxD,discountF); //cout << "r mat: " << r << endl;
+            FounderPr(BellmanOp::DiscountedTransPr,P,idxD,discountF); //cout << "P mat: " << P << endl;
         }
-		// If AverageReward solve equations h = r - dg + Ph where r, d and P have been calculated for the founder. This is equivalent to solving (I-P)h + dg = r -> (I-P,d)(h,g)' = r which is equivalent to solving Qw = r (equation (8.6.8) in Puterman) where last col in (I-P) replaced with d.
-		// If DiscountedReward solve equations w = r + Pw -> (I-P)w = r
-		matAlg.IMinusP(P);  // Set P := I-P
-		if (crit==AverageReward) for(idx j=0; j<(idx)rows; ++j) P(j,rows-1) = d(j,0);   // set implicit h_{rows-1}=0 and calc g here.
-		if (matAlg.LASolve(P,w,r)) {g = -INF; log << " Error: can not solve system equations. Is the model fulfilling the model assumptions (e.g. unichain)? "; break;}
-		if (crit==AverageReward) {
-            g = w(rows-1,0);
+		// If Average solve equations h = r - dg + Ph where r, d and P have been calculated for the founder. This is equivalent to solving (I-P)h + dg = r -> (I-P,d)(h,g)' = r which is equivalent to solving Qw = r (equation (8.6.8) in Puterman) where last col in (I-P) replaced with d.
+		// If Discounted solve equations w = r + Pw -> (I-P)w = r
+		P *= -1.0;       // Set P := I-P
+        P.diag() += 1.0;
+		if (op==BellmanOp::Average) P.col(rows-1) = d;   // set implicit h_{rows-1}=0 and calc g here.
+		if (!arma::solve(w, P, r)) {g = -INF; log << " Error: can not solve system equations. Is the model fulfilling the model assumptions (e.g. unichain)? "; break;}
+		if (op==BellmanOp::Average) {
+            g = w(rows-1);
             log << "(" << g << ") "; if (verbose) log << endl; //cout << "g=" << g << endl;
 		} //cout << "w mat: " << w << endl;
 		state_iterator iteL; idx j;
 		for (iteL=state_begin("1"), j=0; iteL!=state_end("1"); ++iteL, ++j) {
-            if (j<(idx)rows-1 ) HMDP::w(iteL) = w(j,0);
-            else if (crit==DiscountedReward) HMDP::w(iteL) = w(j,0);
+            if (j<(idx)rows-1 ) HMDP::w(iteL) = w(j);
+            else if (op==BellmanOp::Discounted) HMDP::w(iteL) = w(j);
 		}
 		// update policy
-		newPred = CalcOptPolicy(crit, idxW, g, idxD, discountF);
+		newPred = CalcOptPolicy(op, sense, idxW, g, idxD, discountF);
 		if (!okay) {g=-INF; break;}   // something went wrong (see the log)
 		if (!newPred) {
 			log << k+1;
-			if (crit==AverageReward) log << " (" << g << ") "; else log << " ";
+			if (op==BellmanOp::Average) log << " (" << g << ") "; else log << " ";
 			if (verbose) log << endl;
 			break;    // optimal strategy found
 		}
 		if (k>=maxIte) { log << "\nReached upper limit of iterations! Seems to loop. \nIs the model fulfilling the model assumptions (e.g. unichain)?\n"; break;}
 	}
 	log << "finished. Cpu time: " << timer.ElapsedTime("sec") << " sec." << endl;
-	if (crit==AverageReward) return g; //cout << "Rewards: " << vec2String(GetStageW("0")) << endl;
+	if (op==BellmanOp::Average) return g; //cout << "Weights: " << vec2String(GetStageW("0")) << endl;
 	return -INF;
 }
 
 
 //-----------------------------------------------------------------------------
 
-flt HMDP::PolicyIteFixedPolicy(Crit crit, const idx idxW, const idx idxD, const flt discountF) {
+flt HMDP::PolicyIteFixedPolicy(BellmanOp op, const idx idxW, const idx idxD, const flt discountF) {
 	ResetLog();
+    ValidateGlobalWeightForOp(op, idxW);
 	if (timeHorizon<INFINT) {
 		log << "Policy iteration can only be done on infinite time-horizon HMDPs!" << endl;
 		return -INF;
 	}
     log << "Run policy iteration (given a fixed policy) ";
-	switch (crit) {
-        case AverageReward: log << "under average reward criterion using \nreward '" <<
+	switch (op) {
+        case BellmanOp::Average: log << "under average expected-weight Bellman operator using \nweight '" <<
             GetWName(idxW) << "' over '" << GetWName(idxD) << "'. Iterations (g):" << endl;
             break;
-        case DiscountedReward: log << "using quantity '" << GetWName(idxW)
-            << "' under discounting criterion \nwith '" << GetWName(idxD)
+        case BellmanOp::Discounted: log << "using weight '" << GetWName(idxW)
+            << "' under discounted expected-weight Bellman operator \nwith '" << GetWName(idxD)
             << "' as duration using discount factor " << discountF
             << ". \nIteration(s):";
             break;
-        default: log << "Criterion not defined for policy iteration!" << endl; return -INF;
+        default: log << "Bellman operator not defined for policy iteration!" << endl; return -INF;
 	}
-	MatAlg matAlg; // Matrix routines
 	ExternalResetActions(idxW, idxD);
 	timer.StartTimer();
 	SetStateWStage("1", (flt)0);
 	int rows = GetStateSize("0");
-	MatSimple<double> r(rows,1),   // Matrix of founder rewards
-				   w(rows,1),      // Matrix of weights (the unknown)
-				   d(rows,1),      // Matrix of denominator values
-				   P(rows,rows);   // Matrix of prob values
-	MatSimple<double> I(rows,true); // identity
+	arma::vec r(rows),   // Vector of founder weights
+              w(rows),   // Vector of weights (the unknown)
+              d(rows);   // Vector of denominator values
+	arma::mat P(rows, rows); // Matrix of prob values
 	flt g = 0;
 	okay = true;
+    for (state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        idx actionSize = GetActionSize(iteS);
+        if (actionSize>0 && (iteS->pred<0 || iteS->pred>=(int)actionSize)) {
+            log << "Error: a valid fixed policy must be set before policyIteFixedPolicy()." << endl;
+            return -INF;
+        }
+    }
 
-    // find rewards, dur, trans pr at founder given policy
-    if (crit==AverageReward) {
-        FounderW(Reward, r, idxW);
-        FounderPr(TransPr,P);
-        FounderW(Reward, d, idxD);
+    // find weights, dur, trans pr at founder given policy
+    if (op==BellmanOp::Average) {
+        FounderW(BellmanOp::Expected, r, idxW);
+        FounderPr(BellmanOp::TransPr,P);
+        FounderW(BellmanOp::Expected, d, idxD);
     }
     else {
-        FounderW(crit, r, idxW,g,idxD,discountF); //cout << "r mat: " << r << endl;
-        FounderPr(TransPrDiscounted,P,idxD,discountF); //cout << "P mat: " << P << endl;
+        FounderW(op, r, idxW,g,idxD,discountF); //cout << "r mat: " << r << endl;
+        FounderPr(BellmanOp::DiscountedTransPr,P,idxD,discountF); //cout << "P mat: " << P << endl;
     }
-    // If AverageReward solve equations h = r - dg + Ph where r, d and P have been calculated for the founder. This is equivalent to solving (I-P)h + dg = r -> (I-P,d)(h,g)' = r which is equivalent to solving Qw = r (equation (8.6.8) in Puterman) where last col in (I-P) replaced with d.
-    // If DiscountedReward solve equations w = r + Pw -> (I-P)w = r
-    matAlg.IMinusP(P);  // Set P := I-P
-    if (crit==AverageReward) for(idx j=0; j<(idx)rows; ++j) P(j,rows-1) = d(j,0);   // set implicit h_{rows-1}=0 and calc g here.
-    if (matAlg.LASolve(P,w,r)) {g = -INF; log << " Error: can not solve system equations. Is the model fulfilling the model assumptions (e.g. unichain)? "; return -INF;}
-    if (crit==AverageReward) {
-        g = w(rows-1,0);
+    // If Average solve equations h = r - dg + Ph where r, d and P have been calculated for the founder. This is equivalent to solving (I-P)h + dg = r -> (I-P,d)(h,g)' = r which is equivalent to solving Qw = r (equation (8.6.8) in Puterman) where last col in (I-P) replaced with d.
+    // If Discounted solve equations w = r + Pw -> (I-P)w = r
+    P *= -1.0;       // Set P := I-P
+    P.diag() += 1.0;
+    if (op==BellmanOp::Average) P.col(rows-1) = d;   // set implicit h_{rows-1}=0 and calc g here.
+    if (!arma::solve(w, P, r)) {g = -INF; log << " Error: can not solve system equations. Is the model fulfilling the model assumptions (e.g. unichain)? "; return -INF;}
+    if (op==BellmanOp::Average) {
+        g = w(rows-1);
     }
     state_iterator iteL; idx j;
     for (iteL=state_begin("1"), j=0; iteL!=state_end("1"); ++iteL, ++j) {
-        if (j<(idx)rows-1 ) HMDP::w(iteL) = w(j,0);
-        else if (crit==DiscountedReward) HMDP::w(iteL) = w(j,0);
+        if (j<(idx)rows-1 ) HMDP::w(iteL) = w(j);
+        else if (op==BellmanOp::Discounted) HMDP::w(iteL) = w(j);
     }
     // calc weights policy
-    CalcPolicy(crit, idxW, g, idxD, discountF);
+    CalcPolicy(op, idxW, g, idxD, discountF);
 
 	log << "finished. Cpu time: " << timer.ElapsedTime("sec") << " sec." << endl;
-	if (crit==AverageReward) return g; //cout << "Rewards: " << vec2String(GetStageW("0")) << endl;
+	if (op==BellmanOp::Average) return g; //cout << "Weights: " << vec2String(GetStageW("0")) << endl;
 	return -INF;
 }
 
 
 // ----------------------------------------------------------------------------
 
-void HMDP::ValueIte(Crit crit, idx maxIte, flt epsilon, const idx idxW,
+void HMDP::ValueIte(BellmanOp op, OptSense sense, idx maxIte, flt epsilon, const idx idxW,
      const idx idxDur, vector<flt> & termValues,
      const flt g, const flt discountF)
 {
 	ResetLog();
+    if (op!=BellmanOp::TransPr && op!=BellmanOp::DiscountedTransPr) ValidateGlobalWeightForOp(op, idxW);
 	log << "Run value iteration with epsilon = " << epsilon  << " at most "
-		<< maxIte << " time(s)" << endl << "using quantity '" << GetWName(idxW) << "'";
-	switch (crit) {
-        case AverageReward: log << " under average reward criterion given an average reward g = " << g << ".\n";
+		<< maxIte << " time(s)" << endl << "using weight '" << GetWName(idxW) << "'";
+	switch (op) {
+        case BellmanOp::Average: log << " under average expected-weight Bellman operator given an average weight g = " << g << ".\n";
             maxIte = 1;     // not implemented more than one time yet
             break;
-        case Reward: log << " under reward criterion." << endl; break;
-        case DiscountedReward: log << " under expected discounted reward criterion \nwith '" <<
+        case BellmanOp::Expected: log << " under expected-weight Bellman operator." << endl; break;
+        case BellmanOp::Discounted: log << " under discounted expected-weight Bellman operator \nwith '" <<
             GetWName(idxDur) << "' as duration using discount factor " << discountF <<
             ".\nIterations:"; break;
-        default: log << "Criterion not defined for value iteration!" << endl; return;
+        case BellmanOp::Min: log << " under minimum-successor Bellman operator." << endl; break;
+        case BellmanOp::Max: log << " under maximum-successor Bellman operator." << endl; break;
+        case BellmanOp::SecondMoment: log << " under second-moment Bellman operator." << endl; break;
+        case BellmanOp::Variance: log << "Bellman operator not defined for value iteration!" << endl; return;
+        default: log << "Bellman operator not defined for value iteration!" << endl; return;
 	}
+    if (op==BellmanOp::SecondMoment && timeHorizon>=INFINT) {
+        log << "SecondMoment value iteration is currently only supported for finite time-horizon HMDPs." << endl;
+        return;
+    }
 	timer.StartTimer();
 	SetPred(-1);
 	string stageZeroStr = "0";
@@ -831,10 +1133,23 @@ void HMDP::ValueIte(Crit crit, idx maxIte, flt epsilon, const idx idxW,
     for (iteS = state_begin(stageLastStr), iteV=termValues.begin(); iteS!=state_end(stageLastStr); ++iteS, ++iteV) {
 		w(iteS) = *iteV;
 	}
+    if (op==BellmanOp::SecondMoment) {
+        WeightLevel level = ValidateGlobalWeightForOp(op, idxW);
+        idx localIdxW = LocalWeightIdx(level, idxW);
+        vector<flt> mean(states.size(), 0);
+        for (iteS = state_begin(stageLastStr), iteV=termValues.begin(); iteS!=state_end(stageLastStr); ++iteS, ++iteV) {
+            mean[GetId(iteS)] = *iteV;
+            w(iteS) = (*iteV) * (*iteV);
+        }
+        CalcOptPolicySecondMoment(op, sense, level, localIdxW, mean);
+        timer.StopTimer();
+        log << " Finished. Cpu time " << timer.ElapsedTime("sec") << " sec." << endl;
+        return;
+    }
 	idx i;
 	for (i=1;; ++i) { //cout << "Ite: " << i+1 << endl;
-        CalcOptPolicy(crit,idxW,g,idxDur,discountF);
-		if (crit==DiscountedReward)
+        CalcOptPolicy(op,sense,idxW,g,idxDur,discountF);
+		if (op==BellmanOp::Discounted)
             if(MaxDiffFounder()<epsilon) break;
 		if (i<maxIte) {    // set next last stage values to stage zero values
             for (state_iterator iteZ = state_begin(stageZeroStr), iteL=state_begin(stageLastStr);
@@ -843,7 +1158,7 @@ void HMDP::ValueIte(Crit crit, idx maxIte, flt epsilon, const idx idxW,
 		}
 		else break;
 	}
-	if (crit==DiscountedReward && timeHorizon>=INFINT) log << " " << i;
+	if (op==BellmanOp::Discounted && timeHorizon>=INFINT) log << " " << i;
 	timer.StopTimer();
 	log << " Finished. Cpu time " << timer.ElapsedTime("sec") << " sec." << endl;
 	if ( (i==maxIte) & (maxIte!=1) ) log << "Reached upper limit of iterations! Should the limit be increased or \nis the model fulfilling the model assumptions (e.g. no periodicity)?\n";
@@ -851,86 +1166,1897 @@ void HMDP::ValueIte(Crit crit, idx maxIte, flt epsilon, const idx idxW,
 
 // ----------------------------------------------------------------------------
 
-bool HMDP::CalcOptPolicy(Crit crit, idx idxW, flt g, idx idxDur, flt discountF) {
-	//cout << "CalcOptP: idxD=" << idxDur << endl;
-	flt wTmp;      // weight to compare
-	bool newPred = false;       // true if the stored pred change in a node
-	bool isMinInf;      // true if a hyperarc gives -INF in the head node
-	int oldPred;
-	string externalPrefix; // prefix of the external process in memory
-	flt dB = discountF;      // the discount base     // cout << "dB=" << dB << endl;
-	HMDP * pExtProc = NULL;    // pointer to external process
-    ExternalResetStates();  // set state weight to -INF
-    // scan states according to the valid ordering
+bool HMDP::CalcOptPolicy(BellmanOp op, OptSense sense, idx idxW, flt g, idx idxDur, flt discountF) {
+    if (op==BellmanOp::TransPr || op==BellmanOp::DiscountedTransPr) {
+        return CalcOptPolicy(op, sense, WeightLevel::Action, idxW, g, idxDur, discountF);
+    }
+    WeightLevel level = ValidateGlobalWeightForOp(op, idxW);
+    idx localIdxW = LocalWeightIdx(level, idxW);
+    return CalcOptPolicy(op, sense, level, localIdxW, g, idxDur, discountF);
+}
+
+// Dispatch optimal-policy calculation to a specialized Bellman implementation.
+bool HMDP::CalcOptPolicy(BellmanOp op, OptSense sense, WeightLevel level, idx idxW, flt g, idx idxDur, flt discountF) {
+    if (level==WeightLevel::Transition && op!=BellmanOp::Expected && op!=BellmanOp::Min && op!=BellmanOp::Max && op!=BellmanOp::SecondMoment && op!=BellmanOp::Variance) {
+        throw runtime_error("Transition-level weights are not supported for " + BellmanOpName(op) + ".");
+    }
+    if (sense==OptSense::Maximize) {
+        if (op==BellmanOp::Expected && level==WeightLevel::Action) return CalcOptPolicyActionExpectedMax(idxW);
+        if (op==BellmanOp::Expected && level==WeightLevel::Transition) return CalcOptPolicyTransitionExpectedMax(idxW);
+        if (op==BellmanOp::Min && level==WeightLevel::Action) return CalcOptPolicyActionMinMax(idxW);
+        if (op==BellmanOp::Min && level==WeightLevel::Transition) return CalcOptPolicyTransitionMinMax(idxW);
+        if (op==BellmanOp::Max && level==WeightLevel::Action) return CalcOptPolicyActionMaxMax(idxW);
+        if (op==BellmanOp::Max && level==WeightLevel::Transition) return CalcOptPolicyTransitionMaxMax(idxW);
+        if (op==BellmanOp::SecondMoment) {
+            vector<flt> mean(states.size(), 0);
+            return CalcOptPolicySecondMoment(op, sense, level, idxW, mean);
+        }
+        if (op==BellmanOp::Average && level==WeightLevel::Action) return CalcOptPolicyActionAverageMax(idxW, g, idxDur);
+        if (op==BellmanOp::Discounted && level==WeightLevel::Action) return CalcOptPolicyActionDiscountedMax(idxW, idxDur, discountF);
+        if (op==BellmanOp::TransPr && level==WeightLevel::Action) return CalcOptPolicyActionTransPrMax();
+        if (op==BellmanOp::DiscountedTransPr && level==WeightLevel::Action) return CalcOptPolicyActionDiscountedTransPrMax(idxDur, discountF);
+    } else if (sense==OptSense::Minimize) {
+        if (op==BellmanOp::Expected && level==WeightLevel::Action) return CalcOptPolicyActionExpectedMin(idxW);
+        if (op==BellmanOp::Expected && level==WeightLevel::Transition) return CalcOptPolicyTransitionExpectedMin(idxW);
+        if (op==BellmanOp::Min && level==WeightLevel::Action) return CalcOptPolicyActionMinMin(idxW);
+        if (op==BellmanOp::Min && level==WeightLevel::Transition) return CalcOptPolicyTransitionMinMin(idxW);
+        if (op==BellmanOp::Max && level==WeightLevel::Action) return CalcOptPolicyActionMaxMin(idxW);
+        if (op==BellmanOp::Max && level==WeightLevel::Transition) return CalcOptPolicyTransitionMaxMin(idxW);
+        if (op==BellmanOp::SecondMoment) {
+            vector<flt> mean(states.size(), 0);
+            return CalcOptPolicySecondMoment(op, sense, level, idxW, mean);
+        }
+        if (op==BellmanOp::Average && level==WeightLevel::Action) return CalcOptPolicyActionAverageMin(idxW, g, idxDur);
+        if (op==BellmanOp::Discounted && level==WeightLevel::Action) return CalcOptPolicyActionDiscountedMin(idxW, idxDur, discountF);
+        if (op==BellmanOp::TransPr && level==WeightLevel::Action) return CalcOptPolicyActionTransPrMin();
+        if (op==BellmanOp::DiscountedTransPr && level==WeightLevel::Action) return CalcOptPolicyActionDiscountedTransPrMin(idxDur, discountF);
+    } else {
+        throw runtime_error("Invalid optimization sense.");
+    }
+    throw runtime_error("Bellman operator not implemented.");
+}
+
+string HMDP::BellmanOpName(BellmanOp op) const {
+    switch (op) {
+        case BellmanOp::Expected: return "BellmanOp::Expected";
+        case BellmanOp::Discounted: return "BellmanOp::Discounted";
+        case BellmanOp::Average: return "BellmanOp::Average";
+        case BellmanOp::TransPr: return "BellmanOp::TransPr";
+        case BellmanOp::DiscountedTransPr: return "BellmanOp::DiscountedTransPr";
+        case BellmanOp::Min: return "BellmanOp::Min";
+        case BellmanOp::Max: return "BellmanOp::Max";
+        case BellmanOp::SecondMoment: return "BellmanOp::SecondMoment";
+        case BellmanOp::Variance: return "BellmanOp::Variance";
+    }
+    return "Invalid Bellman operator";
+}
+
+string HMDP::OptSenseName(OptSense sense) const {
+    switch (sense) {
+        case OptSense::Maximize: return "OptSense::Maximize";
+        case OptSense::Minimize: return "OptSense::Minimize";
+    }
+    return "Invalid optimization sense";
+}
+
+HMDP::WeightLevel HMDP::ValidateGlobalWeightForOp(BellmanOp op, idx iW) const {
+    WeightLevel level = WeightLevelFromGlobalIdx(iW);
+    if (level==WeightLevel::Transition && op!=BellmanOp::Expected && op!=BellmanOp::Min && op!=BellmanOp::Max && op!=BellmanOp::SecondMoment && op!=BellmanOp::Variance) {
+        throw runtime_error("Transition-level weights are not supported for " + BellmanOpName(op) + ".");
+    }
+    return level;
+}
+
+// Validate that an action weight is present on every action.
+void HMDP::CheckActionWeightsAvailable(idx idxW) const {
+    if (idxW>=weightActionNames.size()) throw runtime_error("Action weight index out of range.");
+    for (vector<HMDPState>::const_iterator iteS=states.begin(); iteS!=states.end(); ++iteS) {
+        for (vector<HMDPAction>::const_iterator iteA=iteS->actions.begin(); iteA!=iteS->actions.end(); ++iteA) {
+            if (idxW>=iteA->w.size()) throw runtime_error("Action weight value is missing for the requested index.");
+        }
+    }
+}
+
+// Validate that a transition weight is present on every transition.
+void HMDP::CheckTransitionWeightsAvailable(idx idxW) const {
+    if (idxW>=weightTransNames.size()) throw runtime_error("Transition weight index out of range.");
+    for (vector<HMDPState>::const_iterator iteS=states.begin(); iteS!=states.end(); ++iteS) {
+        for (vector<HMDPAction>::const_iterator iteA=iteS->actions.begin(); iteA!=iteS->actions.end(); ++iteA) {
+            for (vector<HMDPTrans>::const_iterator iteT=iteA->trans.begin(); iteT!=iteA->trans.end(); ++iteT) {
+                if (idxW>=iteT->w.size()) throw runtime_error("Transition-level weight missing for transition.");
+            }
+        }
+    }
+}
+
+vector<flt> HMDP::CalcRPO(BellmanOp op, OptSense sense, vector<idx> & iS, idx idxW, vector<idx> & idxA, flt g, idx idxDur, flt discountF) {
+    if (op==BellmanOp::TransPr) {
+        if (sense==OptSense::Maximize) return CalcRPOActionTransPrMax(iS, idxA);
+        if (sense==OptSense::Minimize) return CalcRPOActionTransPrMin(iS, idxA);
+        throw runtime_error("Invalid optimization sense.");
+    }
+    if (op==BellmanOp::DiscountedTransPr) {
+        if (sense==OptSense::Maximize) return CalcRPOActionDiscountedTransPrMax(iS, idxA, idxDur, discountF);
+        if (sense==OptSense::Minimize) return CalcRPOActionDiscountedTransPrMin(iS, idxA, idxDur, discountF);
+        throw runtime_error("Invalid optimization sense.");
+    }
+
+    WeightLevel level = ValidateGlobalWeightForOp(op, idxW);
+    idx localIdxW = LocalWeightIdx(level, idxW);
+
+    if (sense==OptSense::Maximize) {
+        if (op==BellmanOp::Expected && level==WeightLevel::Action) return CalcRPOActionExpectedMax(iS, localIdxW, idxA);
+        if (op==BellmanOp::Expected && level==WeightLevel::Transition) return CalcRPOTransitionExpectedMax(iS, localIdxW, idxA);
+        if (op==BellmanOp::Average && level==WeightLevel::Action) return CalcRPOActionAverageMax(iS, localIdxW, idxA, g, idxDur);
+        if (op==BellmanOp::Discounted && level==WeightLevel::Action) return CalcRPOActionDiscountedMax(iS, localIdxW, idxA, idxDur, discountF);
+    } else if (sense==OptSense::Minimize) {
+        if (op==BellmanOp::Expected && level==WeightLevel::Action) return CalcRPOActionExpectedMin(iS, localIdxW, idxA);
+        if (op==BellmanOp::Expected && level==WeightLevel::Transition) return CalcRPOTransitionExpectedMin(iS, localIdxW, idxA);
+        if (op==BellmanOp::Average && level==WeightLevel::Action) return CalcRPOActionAverageMin(iS, localIdxW, idxA, g, idxDur);
+        if (op==BellmanOp::Discounted && level==WeightLevel::Action) return CalcRPOActionDiscountedMin(iS, localIdxW, idxA, idxDur, discountF);
+    } else {
+        throw runtime_error("Invalid optimization sense.");
+    }
+
+    throw runtime_error("Bellman operator not implemented.");
+}
+
+vector<flt> HMDP::CalcRPOActionExpectedMax(vector<idx> & iS, idx idxW, vector<idx> & idxA) {
+    CheckActionWeightsAvailable(idxW);
+    vector<flt> result;
+    for (idx i=0; i<iS.size(); ++i) {
+        flt wA = -INF;
+        flt wMax = -INF;
+        state_iterator iteS = GetIte(iS[i]);
+        action_iterator iteAA = GetIte(iteS, idxA[i]);
+        if ((GetActionSize(iteS)==0) || (GetActionSize(iteS)==1)) {
+            result.push_back(-INF);
+            continue;
+        }
+        for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) {
+            flt wTmp = iteA->w[idxW];
+            bool isMinInf = false;
+            for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                flt nextW = states[iteT->id].w;
+                if (nextW <= -INF) {
+                    wTmp = -INF;
+                    isMinInf = true;
+                    break;
+                }
+                wTmp += iteT->pr * nextW;
+            }
+            if (isMinInf) continue;
+            if (iteA==iteAA) wA = wTmp;
+            else wMax = max(wMax, wTmp);
+        }
+        result.push_back(wA - wMax);
+    }
+    return result;
+}
+
+vector<flt> HMDP::CalcRPOTransitionExpectedMax(vector<idx> & iS, idx idxW, vector<idx> & idxA) {
+    CheckTransitionWeightsAvailable(idxW);
+    vector<flt> result;
+    for (idx i=0; i<iS.size(); ++i) {
+        flt wA = -INF;
+        flt wMax = -INF;
+        state_iterator iteS = GetIte(iS[i]);
+        action_iterator iteAA = GetIte(iteS, idxA[i]);
+        if ((GetActionSize(iteS)==0) || (GetActionSize(iteS)==1)) {
+            result.push_back(-INF);
+            continue;
+        }
+        for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) {
+            flt wTmp = 0;
+            bool isMinInf = false;
+            for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                flt nextW = states[iteT->id].w;
+                if (nextW <= -INF) {
+                    wTmp = -INF;
+                    isMinInf = true;
+                    break;
+                }
+                wTmp += iteT->pr * (iteT->w[idxW] + nextW);
+            }
+            if (isMinInf) continue;
+            if (iteA==iteAA) wA = wTmp;
+            else wMax = max(wMax, wTmp);
+        }
+        result.push_back(wA - wMax);
+    }
+    return result;
+}
+
+vector<flt> HMDP::CalcRPOActionAverageMax(vector<idx> & iS, idx idxW, vector<idx> & idxA, flt g, idx idxDur) {
+    CheckActionWeightsAvailable(idxW);
+    CheckActionWeightsAvailable(idxDur);
+    vector<flt> result;
+    for (idx i=0; i<iS.size(); ++i) {
+        flt wA = -INF;
+        flt wMax = -INF;
+        state_iterator iteS = GetIte(iS[i]);
+        action_iterator iteAA = GetIte(iteS, idxA[i]);
+        if ((GetActionSize(iteS)==0) || (GetActionSize(iteS)==1)) {
+            result.push_back(-INF);
+            continue;
+        }
+        for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) {
+            flt wTmp = iteA->w[idxW] - iteA->w[idxDur] * g;
+            bool isMinInf = false;
+            for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                flt nextW = states[iteT->id].w;
+                if (nextW <= -INF) {
+                    wTmp = -INF;
+                    isMinInf = true;
+                    break;
+                }
+                wTmp += iteT->pr * nextW;
+            }
+            if (isMinInf) continue;
+            if (iteA==iteAA) wA = wTmp;
+            else wMax = max(wMax, wTmp);
+        }
+        result.push_back(wA - wMax);
+    }
+    return result;
+}
+
+vector<flt> HMDP::CalcRPOActionDiscountedMax(vector<idx> & iS, idx idxW, vector<idx> & idxA, idx idxDur, flt discountF) {
+    CheckActionWeightsAvailable(idxW);
+    CheckActionWeightsAvailable(idxDur);
+    vector<flt> result;
+    for (idx i=0; i<iS.size(); ++i) {
+        flt wA = -INF;
+        flt wMax = -INF;
+        state_iterator iteS = GetIte(iS[i]);
+        action_iterator iteAA = GetIte(iteS, idxA[i]);
+        if ((GetActionSize(iteS)==0) || (GetActionSize(iteS)==1)) {
+            result.push_back(-INF);
+            continue;
+        }
+        for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) {
+            flt wTmp = 0;
+            bool isMinInf = false;
+            for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                flt nextW = states[iteT->id].w;
+                if (nextW <= -INF) {
+                    wTmp = -INF;
+                    isMinInf = true;
+                    break;
+                }
+                wTmp += iteT->pr * nextW;
+            }
+            if (isMinInf) continue;
+            wTmp = wTmp * pow(discountF, iteA->w[idxDur]) + iteA->w[idxW];
+            if (iteA==iteAA) wA = wTmp;
+            else wMax = max(wMax, wTmp);
+        }
+        result.push_back(wA - wMax);
+    }
+    return result;
+}
+
+vector<flt> HMDP::CalcRPOActionTransPrMax(vector<idx> & iS, vector<idx> & idxA) {
+    vector<flt> result;
+    for (idx i=0; i<iS.size(); ++i) {
+        flt wA = -INF;
+        flt wMax = -INF;
+        state_iterator iteS = GetIte(iS[i]);
+        action_iterator iteAA = GetIte(iteS, idxA[i]);
+        if ((GetActionSize(iteS)==0) || (GetActionSize(iteS)==1)) {
+            result.push_back(-INF);
+            continue;
+        }
+        for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) {
+            flt wTmp = 0;
+            bool isMinInf = false;
+            for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                flt nextW = states[iteT->id].w;
+                if (nextW <= -INF) {
+                    wTmp = -INF;
+                    isMinInf = true;
+                    break;
+                }
+                wTmp += iteT->pr * nextW;
+            }
+            if (isMinInf) continue;
+            if (iteA==iteAA) wA = wTmp;
+            else wMax = max(wMax, wTmp);
+        }
+        result.push_back(wA - wMax);
+    }
+    return result;
+}
+
+vector<flt> HMDP::CalcRPOActionDiscountedTransPrMax(vector<idx> & iS, vector<idx> & idxA, idx idxDur, flt discountF) {
+    CheckActionWeightsAvailable(idxDur);
+    vector<flt> result;
+    for (idx i=0; i<iS.size(); ++i) {
+        flt wA = -INF;
+        flt wMax = -INF;
+        state_iterator iteS = GetIte(iS[i]);
+        action_iterator iteAA = GetIte(iteS, idxA[i]);
+        if ((GetActionSize(iteS)==0) || (GetActionSize(iteS)==1)) {
+            result.push_back(-INF);
+            continue;
+        }
+        for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) {
+            flt wTmp = 0;
+            bool isMinInf = false;
+            for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                flt nextW = states[iteT->id].w;
+                if (nextW <= -INF) {
+                    wTmp = -INF;
+                    isMinInf = true;
+                    break;
+                }
+                wTmp += iteT->pr * nextW;
+            }
+            if (isMinInf) continue;
+            wTmp *= pow(discountF, iteA->w[idxDur]);
+            if (iteA==iteAA) wA = wTmp;
+            else wMax = max(wMax, wTmp);
+        }
+        result.push_back(wA - wMax);
+    }
+    return result;
+}
+
+vector<flt> HMDP::CalcRPOActionExpectedMin(vector<idx> & iS, idx idxW, vector<idx> & idxA) {
+    CheckActionWeightsAvailable(idxW);
+    vector<flt> result;
+    for (idx i=0; i<iS.size(); ++i) {
+        flt wA = INF;
+        flt wMin = INF;
+        state_iterator iteS = GetIte(iS[i]);
+        action_iterator iteAA = GetIte(iteS, idxA[i]);
+        if ((GetActionSize(iteS)==0) || (GetActionSize(iteS)==1)) {
+            result.push_back(-INF);
+            continue;
+        }
+        for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) {
+            flt wTmp = iteA->w[idxW];
+            bool isMinInf = false;
+            for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                flt nextW = states[iteT->id].w;
+                if (nextW <= -INF) {
+                    wTmp = -INF;
+                    isMinInf = true;
+                    break;
+                }
+                wTmp += iteT->pr * nextW;
+            }
+            if (isMinInf) continue;
+            if (iteA==iteAA) wA = wTmp;
+            else wMin = min(wMin, wTmp);
+        }
+        result.push_back(wMin - wA);
+    }
+    return result;
+}
+
+vector<flt> HMDP::CalcRPOTransitionExpectedMin(vector<idx> & iS, idx idxW, vector<idx> & idxA) {
+    CheckTransitionWeightsAvailable(idxW);
+    vector<flt> result;
+    for (idx i=0; i<iS.size(); ++i) {
+        flt wA = INF;
+        flt wMin = INF;
+        state_iterator iteS = GetIte(iS[i]);
+        action_iterator iteAA = GetIte(iteS, idxA[i]);
+        if ((GetActionSize(iteS)==0) || (GetActionSize(iteS)==1)) {
+            result.push_back(-INF);
+            continue;
+        }
+        for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) {
+            flt wTmp = 0;
+            bool isMinInf = false;
+            for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                flt nextW = states[iteT->id].w;
+                if (nextW <= -INF) {
+                    wTmp = -INF;
+                    isMinInf = true;
+                    break;
+                }
+                wTmp += iteT->pr * (iteT->w[idxW] + nextW);
+            }
+            if (isMinInf) continue;
+            if (iteA==iteAA) wA = wTmp;
+            else wMin = min(wMin, wTmp);
+        }
+        result.push_back(wMin - wA);
+    }
+    return result;
+}
+
+vector<flt> HMDP::CalcRPOActionAverageMin(vector<idx> & iS, idx idxW, vector<idx> & idxA, flt g, idx idxDur) {
+    CheckActionWeightsAvailable(idxW);
+    CheckActionWeightsAvailable(idxDur);
+    vector<flt> result;
+    for (idx i=0; i<iS.size(); ++i) {
+        flt wA = INF;
+        flt wMin = INF;
+        state_iterator iteS = GetIte(iS[i]);
+        action_iterator iteAA = GetIte(iteS, idxA[i]);
+        if ((GetActionSize(iteS)==0) || (GetActionSize(iteS)==1)) {
+            result.push_back(-INF);
+            continue;
+        }
+        for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) {
+            flt wTmp = iteA->w[idxW] - iteA->w[idxDur] * g;
+            bool isMinInf = false;
+            for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                flt nextW = states[iteT->id].w;
+                if (nextW <= -INF) {
+                    wTmp = -INF;
+                    isMinInf = true;
+                    break;
+                }
+                wTmp += iteT->pr * nextW;
+            }
+            if (isMinInf) continue;
+            if (iteA==iteAA) wA = wTmp;
+            else wMin = min(wMin, wTmp);
+        }
+        result.push_back(wMin - wA);
+    }
+    return result;
+}
+
+vector<flt> HMDP::CalcRPOActionDiscountedMin(vector<idx> & iS, idx idxW, vector<idx> & idxA, idx idxDur, flt discountF) {
+    CheckActionWeightsAvailable(idxW);
+    CheckActionWeightsAvailable(idxDur);
+    vector<flt> result;
+    for (idx i=0; i<iS.size(); ++i) {
+        flt wA = INF;
+        flt wMin = INF;
+        state_iterator iteS = GetIte(iS[i]);
+        action_iterator iteAA = GetIte(iteS, idxA[i]);
+        if ((GetActionSize(iteS)==0) || (GetActionSize(iteS)==1)) {
+            result.push_back(-INF);
+            continue;
+        }
+        for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) {
+            flt wTmp = 0;
+            bool isMinInf = false;
+            for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                flt nextW = states[iteT->id].w;
+                if (nextW <= -INF) {
+                    wTmp = -INF;
+                    isMinInf = true;
+                    break;
+                }
+                wTmp += iteT->pr * nextW;
+            }
+            if (isMinInf) continue;
+            wTmp = wTmp * pow(discountF, iteA->w[idxDur]) + iteA->w[idxW];
+            if (iteA==iteAA) wA = wTmp;
+            else wMin = min(wMin, wTmp);
+        }
+        result.push_back(wMin - wA);
+    }
+    return result;
+}
+
+vector<flt> HMDP::CalcRPOActionTransPrMin(vector<idx> & iS, vector<idx> & idxA) {
+    vector<flt> result;
+    for (idx i=0; i<iS.size(); ++i) {
+        flt wA = INF;
+        flt wMin = INF;
+        state_iterator iteS = GetIte(iS[i]);
+        action_iterator iteAA = GetIte(iteS, idxA[i]);
+        if ((GetActionSize(iteS)==0) || (GetActionSize(iteS)==1)) {
+            result.push_back(-INF);
+            continue;
+        }
+        for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) {
+            flt wTmp = 0;
+            bool isMinInf = false;
+            for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                flt nextW = states[iteT->id].w;
+                if (nextW <= -INF) {
+                    wTmp = -INF;
+                    isMinInf = true;
+                    break;
+                }
+                wTmp += iteT->pr * nextW;
+            }
+            if (isMinInf) continue;
+            if (iteA==iteAA) wA = wTmp;
+            else wMin = min(wMin, wTmp);
+        }
+        result.push_back(wMin - wA);
+    }
+    return result;
+}
+
+vector<flt> HMDP::CalcRPOActionDiscountedTransPrMin(vector<idx> & iS, vector<idx> & idxA, idx idxDur, flt discountF) {
+    CheckActionWeightsAvailable(idxDur);
+    vector<flt> result;
+    for (idx i=0; i<iS.size(); ++i) {
+        flt wA = INF;
+        flt wMin = INF;
+        state_iterator iteS = GetIte(iS[i]);
+        action_iterator iteAA = GetIte(iteS, idxA[i]);
+        if ((GetActionSize(iteS)==0) || (GetActionSize(iteS)==1)) {
+            result.push_back(-INF);
+            continue;
+        }
+        for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) {
+            flt wTmp = 0;
+            bool isMinInf = false;
+            for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                flt nextW = states[iteT->id].w;
+                if (nextW <= -INF) {
+                    wTmp = -INF;
+                    isMinInf = true;
+                    break;
+                }
+                wTmp += iteT->pr * nextW;
+            }
+            if (isMinInf) continue;
+            wTmp *= pow(discountF, iteA->w[idxDur]);
+            if (iteA==iteAA) wA = wTmp;
+            else wMin = min(wMin, wTmp);
+        }
+        result.push_back(wMin - wA);
+    }
+    return result;
+}
+
+// Optimize a policy using action weights.
+bool HMDP::CalcOptPolicyActionExpectedMax(idx idxW) {
+    CheckActionWeightsAvailable(idxW);
+    flt wTmp;
+    bool newPred = false;
+    bool isMinInf;
+    int oldPred;
+    string externalPrefix;
+    HMDP * pExtProc = NULL;
+    ExternalResetStates();
     for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
-       if ( ExternalState(iteS) ) { //cout << "State " << GetId(iteS) << " is external\n";
-            if (iteS->w== -INF) newPred = ExternalStatesUpdate(crit, iteS, externalPrefix, pExtProc, idxW, idxDur, g, discountF);
+        if (ExternalState(iteS)) {
+            if (iteS->w== -INF) newPred = ExternalStatesUpdate(BellmanOp::Expected, OptSense::Maximize, iteS, externalPrefix, pExtProc, idxW, 0, 0, 1);
             if (!okay) return false;
             pred(iteS) = 0;
-        }
-        else { //cout << "State " << GetId(iteS) << " is normal - ";
-            if (GetActionSize(iteS)>0) w(iteS)= -INF;  // reset weight
-            oldPred = pred(iteS);  //cout << "  oldPred=" << oldPred << endl;
-            for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) { //cout << "    iA: " << GetIdx(iteS,iteA) << " w=" << vec2String(iteA->w) << " ";
-                wTmp=0; isMinInf = false;
-                for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) { //cout << "      t: w(" << iteT->id << ")=" << w(GetIte(iteT->id)) << endl;
-                    if ( w(GetIte(iteT->id) ) <= -INF) {
-                        wTmp= -INF;
+        } else {
+            if (GetActionSize(iteS)>0) iteS->w = -INF;
+            oldPred = iteS->pred;
+            for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) {
+                // Action weight means r(s,a): add it once, outside the transition loop.
+                wTmp = iteA->w[idxW];
+                isMinInf = false;
+                for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                    flt nextW = states[iteT->id].w;
+                    if (nextW <= -INF) {
+                        wTmp = -INF;
                         isMinInf = true;
                         break;
                     }
-                    wTmp += w( GetIte(iteT->id) ) * pr(iteT);
-                } //cout << "wTmp tails=" << wTmp << endl;
-                if (isMinInf) continue; // if the (h)arc gives -INF go to next (h)arc
-                switch(crit){
-                    case AverageReward: wTmp += w(iteA,idxW)-w(iteA,idxDur)*g; break;
-                    case Reward: wTmp += w(iteA,idxW); break;
-                    case DiscountedReward: wTmp = wTmp*pow(dB,w(iteA,idxDur)) + w(iteA,idxW); break;
-                    //case TransPr: wTmp = wTmp; break;  // generates warning: explicitly assigning value of variable of type 'flt' (aka 'double') to itself
-                    case TransPr: break;
-                    case TransPrDiscounted: wTmp = wTmp*pow(dB,w(iteA,idxDur)); break;
-                    default: log << "Criterion not defined!" << endl; break;
-                }  //cout << "wTmp=" << wTmp << endl;
-                if (w(iteS)<wTmp) {
-                    w(iteS) = wTmp;
-                    pred(iteS) = GetIdx(iteS,iteA); //cout << "Set State: " << GetId(iteS) << " to  w=" << w(iteS) << " pred=" << pred(iteS) << endl;
+                    wTmp += iteT->pr * nextW;
+                }
+                if (isMinInf) continue;
+                if (iteS->w < wTmp) {
+                    iteS->w = wTmp;
+                    iteS->pred = GetIdx(iteS,iteA);
                 }
             }
-            if (pred(iteS) != oldPred) {
-                newPred = true;
-            }
-        } //cout << "State: " << GetId(iteS) << " w=" << w(iteS) << " pred=" << pred(iteS) << endl;
+            if (iteS->pred != oldPred) newPred = true;
+        }
     }
-	if (verbose && pExtProc!=NULL) log << "  Free memory of external process with prefix '" << externalPrefix << "'." << endl;
-	delete pExtProc;
-	return newPred;
+    if (verbose && pExtProc!=NULL) log << "  Free memory of external process with prefix '" << externalPrefix << "'." << endl;
+    delete pExtProc;
+    return newPred;
+}
+
+// Optimize a policy using transition weights.
+bool HMDP::CalcOptPolicyTransitionExpectedMax(idx idxW) {
+    CheckTransitionWeightsAvailable(idxW);
+    flt wTmp;
+    bool newPred = false;
+    bool isMinInf;
+    int oldPred;
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (ExternalState(iteS)) throw runtime_error("Transition-level weights are not implemented for external process states.");
+        if (GetActionSize(iteS)>0) iteS->w = -INF;
+        oldPred = iteS->pred;
+        for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) {
+            wTmp = 0;
+            isMinInf = false;
+            for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                // Transition weight means r(s,a,s'): add it per transition.
+                flt nextW = states[iteT->id].w;
+                if (nextW <= -INF) {
+                    wTmp = -INF;
+                    isMinInf = true;
+                    break;
+                }
+                wTmp += iteT->pr * (iteT->w[idxW] + nextW);
+            }
+            if (isMinInf) continue;
+            if (iteS->w < wTmp) {
+                iteS->w = wTmp;
+                iteS->pred = GetIdx(iteS,iteA);
+            }
+        }
+        if (iteS->pred != oldPred) newPred = true;
+    }
+    return newPred;
+}
+
+// Optimize a policy using action-level average weights.
+bool HMDP::CalcOptPolicyActionAverageMax(idx idxW, flt g, idx idxDur) {
+    CheckActionWeightsAvailable(idxW);
+    CheckActionWeightsAvailable(idxDur);
+    flt wTmp;
+    bool newPred = false;
+    bool isMinInf;
+    int oldPred;
+    string externalPrefix;
+    HMDP * pExtProc = NULL;
+    ExternalResetStates();
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (ExternalState(iteS)) {
+            if (iteS->w== -INF) newPred = ExternalStatesUpdate(BellmanOp::Average, OptSense::Maximize, iteS, externalPrefix, pExtProc, idxW, idxDur, g, 1);
+            if (!okay) return false;
+            iteS->pred = 0;
+        } else {
+            if (GetActionSize(iteS)>0) iteS->w = -INF;
+            oldPred = iteS->pred;
+            for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) {
+                wTmp = iteA->w[idxW] - iteA->w[idxDur] * g;
+                isMinInf = false;
+                for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                    flt nextW = states[iteT->id].w;
+                    if (nextW <= -INF) {
+                        wTmp = -INF;
+                        isMinInf = true;
+                        break;
+                    }
+                    wTmp += iteT->pr * nextW;
+                }
+                if (isMinInf) continue;
+                if (iteS->w < wTmp) {
+                    iteS->w = wTmp;
+                    iteS->pred = GetIdx(iteS,iteA);
+                }
+            }
+            if (iteS->pred != oldPred) newPred = true;
+        }
+    }
+    if (verbose && pExtProc!=NULL) log << "  Free memory of external process with prefix '" << externalPrefix << "'." << endl;
+    delete pExtProc;
+    return newPred;
+}
+
+// Optimize a policy using action-level discounted weights.
+bool HMDP::CalcOptPolicyActionDiscountedMax(idx idxW, idx idxDur, flt discountF) {
+    CheckActionWeightsAvailable(idxW);
+    CheckActionWeightsAvailable(idxDur);
+    flt wTmp;
+    bool newPred = false;
+    bool isMinInf;
+    int oldPred;
+    string externalPrefix;
+    HMDP * pExtProc = NULL;
+    ExternalResetStates();
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (ExternalState(iteS)) {
+            if (iteS->w== -INF) newPred = ExternalStatesUpdate(BellmanOp::Discounted, OptSense::Maximize, iteS, externalPrefix, pExtProc, idxW, idxDur, 0, discountF);
+            if (!okay) return false;
+            iteS->pred = 0;
+        } else {
+            if (GetActionSize(iteS)>0) iteS->w = -INF;
+            oldPred = iteS->pred;
+            for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) {
+                wTmp = 0;
+                isMinInf = false;
+                for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                    flt nextW = states[iteT->id].w;
+                    if (nextW <= -INF) {
+                        wTmp = -INF;
+                        isMinInf = true;
+                        break;
+                    }
+                    wTmp += iteT->pr * nextW;
+                }
+                if (isMinInf) continue;
+                wTmp = wTmp * pow(discountF, iteA->w[idxDur]) + iteA->w[idxW];
+                if (iteS->w < wTmp) {
+                    iteS->w = wTmp;
+                    iteS->pred = GetIdx(iteS,iteA);
+                }
+            }
+            if (iteS->pred != oldPred) newPred = true;
+        }
+    }
+    if (verbose && pExtProc!=NULL) log << "  Free memory of external process with prefix '" << externalPrefix << "'." << endl;
+    delete pExtProc;
+    return newPred;
+}
+
+/** Optimize a policy using transition probabilities as the Bellman value. */
+bool HMDP::CalcOptPolicyActionTransPrMax() {
+    flt wTmp;
+    bool newPred = false;
+    bool isMinInf;
+    int oldPred;
+    string externalPrefix;
+    HMDP * pExtProc = NULL;
+    ExternalResetStates();
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (ExternalState(iteS)) {
+            if (iteS->w== -INF) newPred = ExternalStatesUpdate(BellmanOp::TransPr, OptSense::Maximize, iteS, externalPrefix, pExtProc, 0, 0, 0, 1);
+            if (!okay) return false;
+            iteS->pred = 0;
+        } else {
+            if (GetActionSize(iteS)>0) iteS->w = -INF;
+            oldPred = iteS->pred;
+            for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) {
+                wTmp = 0;
+                isMinInf = false;
+                for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                    flt nextW = states[iteT->id].w;
+                    if (nextW <= -INF) {
+                        wTmp = -INF;
+                        isMinInf = true;
+                        break;
+                    }
+                    wTmp += iteT->pr * nextW;
+                }
+                if (isMinInf) continue;
+                if (iteS->w < wTmp) {
+                    iteS->w = wTmp;
+                    iteS->pred = GetIdx(iteS,iteA);
+                }
+            }
+            if (iteS->pred != oldPred) newPred = true;
+        }
+    }
+    if (verbose && pExtProc!=NULL) log << "  Free memory of external process with prefix '" << externalPrefix << "'." << endl;
+    delete pExtProc;
+    return newPred;
+}
+
+/** Optimize a policy using discounted transition probabilities as the Bellman value. */
+bool HMDP::CalcOptPolicyActionDiscountedTransPrMax(idx idxDur, flt discountF) {
+    CheckActionWeightsAvailable(idxDur);
+    flt wTmp;
+    bool newPred = false;
+    bool isMinInf;
+    int oldPred;
+    string externalPrefix;
+    HMDP * pExtProc = NULL;
+    ExternalResetStates();
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (ExternalState(iteS)) {
+            if (iteS->w== -INF) newPred = ExternalStatesUpdate(BellmanOp::DiscountedTransPr, OptSense::Maximize, iteS, externalPrefix, pExtProc, 0, idxDur, 0, discountF);
+            if (!okay) return false;
+            iteS->pred = 0;
+        } else {
+            if (GetActionSize(iteS)>0) iteS->w = -INF;
+            oldPred = iteS->pred;
+            for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) {
+                wTmp = 0;
+                isMinInf = false;
+                for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                    flt nextW = states[iteT->id].w;
+                    if (nextW <= -INF) {
+                        wTmp = -INF;
+                        isMinInf = true;
+                        break;
+                    }
+                    wTmp += iteT->pr * nextW;
+                }
+                if (isMinInf) continue;
+                wTmp *= pow(discountF, iteA->w[idxDur]);
+                if (iteS->w < wTmp) {
+                    iteS->w = wTmp;
+                    iteS->pred = GetIdx(iteS,iteA);
+                }
+            }
+            if (iteS->pred != oldPred) newPred = true;
+        }
+    }
+    if (verbose && pExtProc!=NULL) log << "  Free memory of external process with prefix '" << externalPrefix << "'." << endl;
+    delete pExtProc;
+    return newPred;
+}
+
+bool HMDP::CalcOptPolicyActionExpectedMin(idx idxW) {
+    CheckActionWeightsAvailable(idxW);
+    flt wTmp;
+    bool newPred = false;
+    bool isMinInf;
+    int oldPred;
+    string externalPrefix;
+    HMDP * pExtProc = NULL;
+    ExternalResetStates();
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (ExternalState(iteS)) {
+            if (iteS->w== -INF) newPred = ExternalStatesUpdate(BellmanOp::Expected, OptSense::Minimize, iteS, externalPrefix, pExtProc, idxW, 0, 0, 1);
+            if (!okay) return false;
+            pred(iteS) = 0;
+        } else {
+            if (GetActionSize(iteS)>0) iteS->w = INF;
+            oldPred = iteS->pred;
+            for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) {
+                wTmp = iteA->w[idxW];
+                isMinInf = false;
+                for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                    flt nextW = states[iteT->id].w;
+                    if (nextW <= -INF) {
+                        wTmp = -INF;
+                        isMinInf = true;
+                        break;
+                    }
+                    wTmp += iteT->pr * nextW;
+                }
+                if (isMinInf) continue;
+                if (iteS->w > wTmp) {
+                    iteS->w = wTmp;
+                    iteS->pred = GetIdx(iteS,iteA);
+                }
+            }
+            if (iteS->pred != oldPred) newPred = true;
+        }
+    }
+    if (verbose && pExtProc!=NULL) log << "  Free memory of external process with prefix '" << externalPrefix << "'." << endl;
+    delete pExtProc;
+    return newPred;
+}
+
+bool HMDP::CalcOptPolicyTransitionExpectedMin(idx idxW) {
+    CheckTransitionWeightsAvailable(idxW);
+    flt wTmp;
+    bool newPred = false;
+    bool isMinInf;
+    int oldPred;
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (ExternalState(iteS)) throw runtime_error("Transition-level weights are not implemented for external process states.");
+        if (GetActionSize(iteS)>0) iteS->w = INF;
+        oldPred = iteS->pred;
+        for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) {
+            wTmp = 0;
+            isMinInf = false;
+            for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                flt nextW = states[iteT->id].w;
+                if (nextW <= -INF) {
+                    wTmp = -INF;
+                    isMinInf = true;
+                    break;
+                }
+                wTmp += iteT->pr * (iteT->w[idxW] + nextW);
+            }
+            if (isMinInf) continue;
+            if (iteS->w > wTmp) {
+                iteS->w = wTmp;
+                iteS->pred = GetIdx(iteS,iteA);
+            }
+        }
+        if (iteS->pred != oldPred) newPred = true;
+    }
+    return newPred;
+}
+
+bool HMDP::CalcOptPolicyActionSecondMomentMax(idx idxW, vector<flt> &mean) {
+    CheckActionWeightsAvailable(idxW);
+    flt wTmp;
+    flt uTmp;
+    bool newPred = false;
+    bool isMinInf;
+    int oldPred;
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (ExternalState(iteS)) throw runtime_error("SecondMoment is not implemented for external process states.");
+        idx iS = GetId(iteS);
+        if (GetActionSize(iteS)>0) iteS->w = -INF;
+        else {
+            iteS->w = mean[iS] * mean[iS];
+            continue;
+        }
+        oldPred = iteS->pred;
+        for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) {
+            wTmp = 0;
+            uTmp = iteA->w[idxW];
+            isMinInf = false;
+            for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                flt qNext = states[iteT->id].w;
+                if (qNext <= -INF) {
+                    wTmp = -INF;
+                    isMinInf = true;
+                    break;
+                }
+                flt y = iteA->w[idxW];
+                wTmp += iteT->pr * (y * y + 2 * y * mean[iteT->id] + qNext);
+                uTmp += iteT->pr * mean[iteT->id];
+            }
+            if (isMinInf) continue;
+            if (iteS->w < wTmp) {
+                iteS->w = wTmp;
+                mean[iS] = uTmp;
+                iteS->pred = GetIdx(iteS,iteA);
+            }
+        }
+        if (iteS->pred != oldPred) newPred = true;
+    }
+    return newPred;
+}
+
+bool HMDP::CalcOptPolicyActionSecondMomentMin(idx idxW, vector<flt> &mean) {
+    CheckActionWeightsAvailable(idxW);
+    flt wTmp;
+    flt uTmp;
+    bool newPred = false;
+    bool isMinInf;
+    int oldPred;
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (ExternalState(iteS)) throw runtime_error("SecondMoment is not implemented for external process states.");
+        idx iS = GetId(iteS);
+        if (GetActionSize(iteS)>0) iteS->w = INF;
+        else {
+            iteS->w = mean[iS] * mean[iS];
+            continue;
+        }
+        oldPred = iteS->pred;
+        for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) {
+            wTmp = 0;
+            uTmp = iteA->w[idxW];
+            isMinInf = false;
+            for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                flt qNext = states[iteT->id].w;
+                if (qNext <= -INF) {
+                    wTmp = -INF;
+                    isMinInf = true;
+                    break;
+                }
+                flt y = iteA->w[idxW];
+                wTmp += iteT->pr * (y * y + 2 * y * mean[iteT->id] + qNext);
+                uTmp += iteT->pr * mean[iteT->id];
+            }
+            if (isMinInf) continue;
+            if (iteS->w > wTmp) {
+                iteS->w = wTmp;
+                mean[iS] = uTmp;
+                iteS->pred = GetIdx(iteS,iteA);
+            }
+        }
+        if (iteS->pred != oldPred) newPred = true;
+    }
+    return newPred;
+}
+
+bool HMDP::CalcOptPolicyTransitionSecondMomentMax(idx idxW, vector<flt> &mean) {
+    CheckTransitionWeightsAvailable(idxW);
+    flt wTmp;
+    flt uTmp;
+    bool newPred = false;
+    bool isMinInf;
+    int oldPred;
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (ExternalState(iteS)) throw runtime_error("Transition-level weights are not implemented for external process states.");
+        idx iS = GetId(iteS);
+        if (GetActionSize(iteS)>0) iteS->w = -INF;
+        else {
+            iteS->w = mean[iS] * mean[iS];
+            continue;
+        }
+        oldPred = iteS->pred;
+        for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) {
+            wTmp = 0;
+            uTmp = 0;
+            isMinInf = false;
+            for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                flt qNext = states[iteT->id].w;
+                if (qNext <= -INF) {
+                    wTmp = -INF;
+                    isMinInf = true;
+                    break;
+                }
+                flt y = iteT->w[idxW];
+                wTmp += iteT->pr * (y * y + 2 * y * mean[iteT->id] + qNext);
+                uTmp += iteT->pr * (y + mean[iteT->id]);
+            }
+            if (isMinInf) continue;
+            if (iteS->w < wTmp) {
+                iteS->w = wTmp;
+                mean[iS] = uTmp;
+                iteS->pred = GetIdx(iteS,iteA);
+            }
+        }
+        if (iteS->pred != oldPred) newPred = true;
+    }
+    return newPred;
+}
+
+bool HMDP::CalcOptPolicyTransitionSecondMomentMin(idx idxW, vector<flt> &mean) {
+    CheckTransitionWeightsAvailable(idxW);
+    flt wTmp;
+    flt uTmp;
+    bool newPred = false;
+    bool isMinInf;
+    int oldPred;
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (ExternalState(iteS)) throw runtime_error("Transition-level weights are not implemented for external process states.");
+        idx iS = GetId(iteS);
+        if (GetActionSize(iteS)>0) iteS->w = INF;
+        else {
+            iteS->w = mean[iS] * mean[iS];
+            continue;
+        }
+        oldPred = iteS->pred;
+        for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) {
+            wTmp = 0;
+            uTmp = 0;
+            isMinInf = false;
+            for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                flt qNext = states[iteT->id].w;
+                if (qNext <= -INF) {
+                    wTmp = -INF;
+                    isMinInf = true;
+                    break;
+                }
+                flt y = iteT->w[idxW];
+                wTmp += iteT->pr * (y * y + 2 * y * mean[iteT->id] + qNext);
+                uTmp += iteT->pr * (y + mean[iteT->id]);
+            }
+            if (isMinInf) continue;
+            if (iteS->w > wTmp) {
+                iteS->w = wTmp;
+                mean[iS] = uTmp;
+                iteS->pred = GetIdx(iteS,iteA);
+            }
+        }
+        if (iteS->pred != oldPred) newPred = true;
+    }
+    return newPred;
+}
+
+bool HMDP::CalcOptPolicyActionAverageMin(idx idxW, flt g, idx idxDur) {
+    CheckActionWeightsAvailable(idxW);
+    CheckActionWeightsAvailable(idxDur);
+    flt wTmp;
+    bool newPred = false;
+    bool isMinInf;
+    int oldPred;
+    string externalPrefix;
+    HMDP * pExtProc = NULL;
+    ExternalResetStates();
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (ExternalState(iteS)) {
+            if (iteS->w== -INF) newPred = ExternalStatesUpdate(BellmanOp::Average, OptSense::Minimize, iteS, externalPrefix, pExtProc, idxW, idxDur, g, 1);
+            if (!okay) return false;
+            iteS->pred = 0;
+        } else {
+            if (GetActionSize(iteS)>0) iteS->w = INF;
+            oldPred = iteS->pred;
+            for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) {
+                wTmp = iteA->w[idxW] - iteA->w[idxDur] * g;
+                isMinInf = false;
+                for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                    flt nextW = states[iteT->id].w;
+                    if (nextW <= -INF) {
+                        wTmp = -INF;
+                        isMinInf = true;
+                        break;
+                    }
+                    wTmp += iteT->pr * nextW;
+                }
+                if (isMinInf) continue;
+                if (iteS->w > wTmp) {
+                    iteS->w = wTmp;
+                    iteS->pred = GetIdx(iteS,iteA);
+                }
+            }
+            if (iteS->pred != oldPred) newPred = true;
+        }
+    }
+    if (verbose && pExtProc!=NULL) log << "  Free memory of external process with prefix '" << externalPrefix << "'." << endl;
+    delete pExtProc;
+    return newPred;
+}
+
+bool HMDP::CalcOptPolicyActionDiscountedMin(idx idxW, idx idxDur, flt discountF) {
+    CheckActionWeightsAvailable(idxW);
+    CheckActionWeightsAvailable(idxDur);
+    flt wTmp;
+    bool newPred = false;
+    bool isMinInf;
+    int oldPred;
+    string externalPrefix;
+    HMDP * pExtProc = NULL;
+    ExternalResetStates();
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (ExternalState(iteS)) {
+            if (iteS->w== -INF) newPred = ExternalStatesUpdate(BellmanOp::Discounted, OptSense::Minimize, iteS, externalPrefix, pExtProc, idxW, idxDur, 0, discountF);
+            if (!okay) return false;
+            iteS->pred = 0;
+        } else {
+            if (GetActionSize(iteS)>0) iteS->w = INF;
+            oldPred = iteS->pred;
+            for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) {
+                wTmp = 0;
+                isMinInf = false;
+                for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                    flt nextW = states[iteT->id].w;
+                    if (nextW <= -INF) {
+                        wTmp = -INF;
+                        isMinInf = true;
+                        break;
+                    }
+                    wTmp += iteT->pr * nextW;
+                }
+                if (isMinInf) continue;
+                wTmp = wTmp * pow(discountF, iteA->w[idxDur]) + iteA->w[idxW];
+                if (iteS->w > wTmp) {
+                    iteS->w = wTmp;
+                    iteS->pred = GetIdx(iteS,iteA);
+                }
+            }
+            if (iteS->pred != oldPred) newPred = true;
+        }
+    }
+    if (verbose && pExtProc!=NULL) log << "  Free memory of external process with prefix '" << externalPrefix << "'." << endl;
+    delete pExtProc;
+    return newPred;
+}
+
+bool HMDP::CalcOptPolicyActionTransPrMin() {
+    flt wTmp;
+    bool newPred = false;
+    bool isMinInf;
+    int oldPred;
+    string externalPrefix;
+    HMDP * pExtProc = NULL;
+    ExternalResetStates();
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (ExternalState(iteS)) {
+            if (iteS->w== -INF) newPred = ExternalStatesUpdate(BellmanOp::TransPr, OptSense::Minimize, iteS, externalPrefix, pExtProc, 0, 0, 0, 1);
+            if (!okay) return false;
+            iteS->pred = 0;
+        } else {
+            if (GetActionSize(iteS)>0) iteS->w = INF;
+            oldPred = iteS->pred;
+            for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) {
+                wTmp = 0;
+                isMinInf = false;
+                for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                    flt nextW = states[iteT->id].w;
+                    if (nextW <= -INF) {
+                        wTmp = -INF;
+                        isMinInf = true;
+                        break;
+                    }
+                    wTmp += iteT->pr * nextW;
+                }
+                if (isMinInf) continue;
+                if (iteS->w > wTmp) {
+                    iteS->w = wTmp;
+                    iteS->pred = GetIdx(iteS,iteA);
+                }
+            }
+            if (iteS->pred != oldPred) newPred = true;
+        }
+    }
+    if (verbose && pExtProc!=NULL) log << "  Free memory of external process with prefix '" << externalPrefix << "'." << endl;
+    delete pExtProc;
+    return newPred;
+}
+
+bool HMDP::CalcOptPolicyActionDiscountedTransPrMin(idx idxDur, flt discountF) {
+    CheckActionWeightsAvailable(idxDur);
+    flt wTmp;
+    bool newPred = false;
+    bool isMinInf;
+    int oldPred;
+    string externalPrefix;
+    HMDP * pExtProc = NULL;
+    ExternalResetStates();
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (ExternalState(iteS)) {
+            if (iteS->w== -INF) newPred = ExternalStatesUpdate(BellmanOp::DiscountedTransPr, OptSense::Minimize, iteS, externalPrefix, pExtProc, 0, idxDur, 0, discountF);
+            if (!okay) return false;
+            iteS->pred = 0;
+        } else {
+            if (GetActionSize(iteS)>0) iteS->w = INF;
+            oldPred = iteS->pred;
+            for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) {
+                wTmp = 0;
+                isMinInf = false;
+                for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                    flt nextW = states[iteT->id].w;
+                    if (nextW <= -INF) {
+                        wTmp = -INF;
+                        isMinInf = true;
+                        break;
+                    }
+                    wTmp += iteT->pr * nextW;
+                }
+                if (isMinInf) continue;
+                wTmp *= pow(discountF, iteA->w[idxDur]);
+                if (iteS->w > wTmp) {
+                    iteS->w = wTmp;
+                    iteS->pred = GetIdx(iteS,iteA);
+                }
+            }
+            if (iteS->pred != oldPred) newPred = true;
+        }
+    }
+    if (verbose && pExtProc!=NULL) log << "  Free memory of external process with prefix '" << externalPrefix << "'." << endl;
+    delete pExtProc;
+    return newPred;
+}
+
+bool HMDP::CalcOptPolicyActionMinMax(idx idxW) {
+    CheckActionWeightsAvailable(idxW);
+    flt wTmp;
+    flt inner;
+    bool hasNext;
+    bool newPred = false;
+    int oldPred;
+    string externalPrefix;
+    HMDP * pExtProc = NULL;
+    ExternalResetStates();
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (ExternalState(iteS)) {
+            if (iteS->w== -INF) newPred = ExternalStatesUpdate(BellmanOp::Min, OptSense::Maximize, iteS, externalPrefix, pExtProc, idxW, 0, 0, 1);
+            if (!okay) return false;
+            pred(iteS) = 0;
+        } else {
+            if (GetActionSize(iteS)>0) iteS->w = -INF;
+            oldPred = iteS->pred;
+            for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) {
+                inner = INF;
+                hasNext = false;
+                for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                    if (iteT->pr<=0) continue;
+                    hasNext = true;
+                    inner = min(inner, states[iteT->id].w);
+                }
+                wTmp = iteA->w[idxW] + (hasNext ? inner : 0);
+                if (iteS->w < wTmp) {
+                    iteS->w = wTmp;
+                    iteS->pred = GetIdx(iteS,iteA);
+                }
+            }
+            if (iteS->pred != oldPred) newPred = true;
+        }
+    }
+    if (verbose && pExtProc!=NULL) log << "  Free memory of external process with prefix '" << externalPrefix << "'." << endl;
+    delete pExtProc;
+    return newPred;
+}
+
+bool HMDP::CalcOptPolicyActionMinMin(idx idxW) {
+    CheckActionWeightsAvailable(idxW);
+    flt wTmp;
+    flt inner;
+    bool hasNext;
+    bool newPred = false;
+    int oldPred;
+    string externalPrefix;
+    HMDP * pExtProc = NULL;
+    ExternalResetStates();
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (ExternalState(iteS)) {
+            if (iteS->w== -INF) newPred = ExternalStatesUpdate(BellmanOp::Min, OptSense::Minimize, iteS, externalPrefix, pExtProc, idxW, 0, 0, 1);
+            if (!okay) return false;
+            pred(iteS) = 0;
+        } else {
+            if (GetActionSize(iteS)>0) iteS->w = INF;
+            oldPred = iteS->pred;
+            for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) {
+                inner = INF;
+                hasNext = false;
+                for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                    if (iteT->pr<=0) continue;
+                    hasNext = true;
+                    inner = min(inner, states[iteT->id].w);
+                }
+                wTmp = iteA->w[idxW] + (hasNext ? inner : 0);
+                if (iteS->w > wTmp) {
+                    iteS->w = wTmp;
+                    iteS->pred = GetIdx(iteS,iteA);
+                }
+            }
+            if (iteS->pred != oldPred) newPred = true;
+        }
+    }
+    if (verbose && pExtProc!=NULL) log << "  Free memory of external process with prefix '" << externalPrefix << "'." << endl;
+    delete pExtProc;
+    return newPred;
+}
+
+bool HMDP::CalcOptPolicyTransitionMinMax(idx idxW) {
+    CheckTransitionWeightsAvailable(idxW);
+    flt wTmp;
+    bool hasNext;
+    bool newPred = false;
+    int oldPred;
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (ExternalState(iteS)) throw runtime_error("Transition-level weights are not implemented for external process states.");
+        if (GetActionSize(iteS)>0) iteS->w = -INF;
+        oldPred = iteS->pred;
+        for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) {
+            wTmp = INF;
+            hasNext = false;
+            for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                if (iteT->pr<=0) continue;
+                hasNext = true;
+                wTmp = min(wTmp, iteT->w[idxW] + states[iteT->id].w);
+            }
+            if (!hasNext) wTmp = 0;
+            if (iteS->w < wTmp) {
+                iteS->w = wTmp;
+                iteS->pred = GetIdx(iteS,iteA);
+            }
+        }
+        if (iteS->pred != oldPred) newPred = true;
+    }
+    return newPred;
+}
+
+bool HMDP::CalcOptPolicyTransitionMinMin(idx idxW) {
+    CheckTransitionWeightsAvailable(idxW);
+    flt wTmp;
+    bool hasNext;
+    bool newPred = false;
+    int oldPred;
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (ExternalState(iteS)) throw runtime_error("Transition-level weights are not implemented for external process states.");
+        if (GetActionSize(iteS)>0) iteS->w = INF;
+        oldPred = iteS->pred;
+        for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) {
+            wTmp = INF;
+            hasNext = false;
+            for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                if (iteT->pr<=0) continue;
+                hasNext = true;
+                wTmp = min(wTmp, iteT->w[idxW] + states[iteT->id].w);
+            }
+            if (!hasNext) wTmp = 0;
+            if (iteS->w > wTmp) {
+                iteS->w = wTmp;
+                iteS->pred = GetIdx(iteS,iteA);
+            }
+        }
+        if (iteS->pred != oldPred) newPred = true;
+    }
+    return newPred;
+}
+
+bool HMDP::CalcOptPolicyActionMaxMax(idx idxW) {
+    CheckActionWeightsAvailable(idxW);
+    flt wTmp;
+    flt inner;
+    bool hasNext;
+    bool newPred = false;
+    int oldPred;
+    string externalPrefix;
+    HMDP * pExtProc = NULL;
+    ExternalResetStates();
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (ExternalState(iteS)) {
+            if (iteS->w== -INF) newPred = ExternalStatesUpdate(BellmanOp::Max, OptSense::Maximize, iteS, externalPrefix, pExtProc, idxW, 0, 0, 1);
+            if (!okay) return false;
+            pred(iteS) = 0;
+        } else {
+            if (GetActionSize(iteS)>0) iteS->w = -INF;
+            oldPred = iteS->pred;
+            for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) {
+                inner = -INF;
+                hasNext = false;
+                for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                    if (iteT->pr<=0) continue;
+                    hasNext = true;
+                    inner = max(inner, states[iteT->id].w);
+                }
+                wTmp = iteA->w[idxW] + (hasNext ? inner : 0);
+                if (iteS->w < wTmp) {
+                    iteS->w = wTmp;
+                    iteS->pred = GetIdx(iteS,iteA);
+                }
+            }
+            if (iteS->pred != oldPred) newPred = true;
+        }
+    }
+    if (verbose && pExtProc!=NULL) log << "  Free memory of external process with prefix '" << externalPrefix << "'." << endl;
+    delete pExtProc;
+    return newPred;
+}
+
+bool HMDP::CalcOptPolicyActionMaxMin(idx idxW) {
+    CheckActionWeightsAvailable(idxW);
+    flt wTmp;
+    flt inner;
+    bool hasNext;
+    bool newPred = false;
+    int oldPred;
+    string externalPrefix;
+    HMDP * pExtProc = NULL;
+    ExternalResetStates();
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (ExternalState(iteS)) {
+            if (iteS->w== -INF) newPred = ExternalStatesUpdate(BellmanOp::Max, OptSense::Minimize, iteS, externalPrefix, pExtProc, idxW, 0, 0, 1);
+            if (!okay) return false;
+            pred(iteS) = 0;
+        } else {
+            if (GetActionSize(iteS)>0) iteS->w = INF;
+            oldPred = iteS->pred;
+            for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) {
+                inner = -INF;
+                hasNext = false;
+                for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                    if (iteT->pr<=0) continue;
+                    hasNext = true;
+                    inner = max(inner, states[iteT->id].w);
+                }
+                wTmp = iteA->w[idxW] + (hasNext ? inner : 0);
+                if (iteS->w > wTmp) {
+                    iteS->w = wTmp;
+                    iteS->pred = GetIdx(iteS,iteA);
+                }
+            }
+            if (iteS->pred != oldPred) newPred = true;
+        }
+    }
+    if (verbose && pExtProc!=NULL) log << "  Free memory of external process with prefix '" << externalPrefix << "'." << endl;
+    delete pExtProc;
+    return newPred;
+}
+
+bool HMDP::CalcOptPolicyTransitionMaxMax(idx idxW) {
+    CheckTransitionWeightsAvailable(idxW);
+    flt wTmp;
+    bool hasNext;
+    bool newPred = false;
+    int oldPred;
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (ExternalState(iteS)) throw runtime_error("Transition-level weights are not implemented for external process states.");
+        if (GetActionSize(iteS)>0) iteS->w = -INF;
+        oldPred = iteS->pred;
+        for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) {
+            wTmp = -INF;
+            hasNext = false;
+            for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                if (iteT->pr<=0) continue;
+                hasNext = true;
+                wTmp = max(wTmp, iteT->w[idxW] + states[iteT->id].w);
+            }
+            if (!hasNext) wTmp = 0;
+            if (iteS->w < wTmp) {
+                iteS->w = wTmp;
+                iteS->pred = GetIdx(iteS,iteA);
+            }
+        }
+        if (iteS->pred != oldPred) newPred = true;
+    }
+    return newPred;
+}
+
+bool HMDP::CalcOptPolicyTransitionMaxMin(idx idxW) {
+    CheckTransitionWeightsAvailable(idxW);
+    flt wTmp;
+    bool hasNext;
+    bool newPred = false;
+    int oldPred;
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (ExternalState(iteS)) throw runtime_error("Transition-level weights are not implemented for external process states.");
+        if (GetActionSize(iteS)>0) iteS->w = INF;
+        oldPred = iteS->pred;
+        for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) {
+            wTmp = -INF;
+            hasNext = false;
+            for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                if (iteT->pr<=0) continue;
+                hasNext = true;
+                wTmp = max(wTmp, iteT->w[idxW] + states[iteT->id].w);
+            }
+            if (!hasNext) wTmp = 0;
+            if (iteS->w > wTmp) {
+                iteS->w = wTmp;
+                iteS->pred = GetIdx(iteS,iteA);
+            }
+        }
+        if (iteS->pred != oldPred) newPred = true;
+    }
+    return newPred;
 }
 
 // ----------------------------------------------------------------------------
 
-void HMDP::CalcPolicy(Crit crit, idx idxW, flt g, idx idxDur, flt discountF) {
-	//cout << "CalcP: idxW=" << idxW << " idxD=" << idxDur << endl;
-	flt wTmp;      // weight to compare
-	flt dB = discountF;      // the discount base   //  cout<< "r:" << rate << " b:" << rateBase << endl;
-    // scan states according to the valid ordering
+void HMDP::CalcPolicyActionMean(idx idxW, vector<flt> &mean) {
+    CheckActionWeightsAvailable(idxW);
+    mean.assign(states.size(), 0);
     for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
-        //cout << "State " << GetId(iteS) << " is normal with wPred=" << w(iteS) << endl;
+        idx iS = GetId(iteS);
         if (GetActionSize(iteS)>0) {
-            w(iteS)= -INF;  // reset weight
-            action_iterator iteA = GetIte(iteS, pred(iteS));
-            wTmp=0;
+            action_iterator iteA = GetIte(iteS, iteS->pred);
+            flt uTmp = iteA->w[idxW];
             for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
-                wTmp += w( GetIte(iteT->id) ) * pr(iteT);
+                uTmp += iteT->pr * mean[iteT->id];
             }
-            switch(crit){
-                case AverageReward: w(iteS) = wTmp + w(iteA,idxW)-w(iteA,idxDur)*g; break;
-                case Reward: w(iteS) = wTmp + w(iteA,idxW); break;
-                case DiscountedReward: w(iteS) = wTmp*pow(dB,w(iteA,idxDur)) + w(iteA,idxW); break;
-                case TransPr: w(iteS) = wTmp; break;
-                case TransPrDiscounted: w(iteS) = wTmp*pow(dB,w(iteA,idxDur)); break;
-                default: log << "Criterion not defined!" << endl; break;
+            mean[iS] = uTmp;
+        } else {
+            mean[iS] = iteS->w;
+        }
+    }
+}
+
+void HMDP::CalcPolicyTransitionMean(idx idxW, vector<flt> &mean) {
+    CheckTransitionWeightsAvailable(idxW);
+    mean.assign(states.size(), 0);
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (ExternalState(iteS)) throw runtime_error("Transition-level weights are not implemented for external process states.");
+        idx iS = GetId(iteS);
+        if (GetActionSize(iteS)>0) {
+            action_iterator iteA = GetIte(iteS, iteS->pred);
+            flt uTmp = 0;
+            for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                uTmp += iteT->pr * (iteT->w[idxW] + mean[iteT->id]);
             }
-        } //cout << "Policy::State: " << GetId(iteS) << " w=" << w(iteS) << " pred=" << pred(iteS) << endl;
+            mean[iS] = uTmp;
+        } else {
+            mean[iS] = iteS->w;
+        }
+    }
+}
+
+bool HMDP::CalcOptPolicySecondMoment(BellmanOp op, OptSense sense, WeightLevel level, idx idxW, vector<flt> &mean) {
+    if (op!=BellmanOp::SecondMoment) throw runtime_error("Invalid Bellman operator for second-moment optimization.");
+    if (sense==OptSense::Maximize) {
+        if (level==WeightLevel::Action) return CalcOptPolicyActionSecondMomentMax(idxW, mean);
+        if (level==WeightLevel::Transition) return CalcOptPolicyTransitionSecondMomentMax(idxW, mean);
+    } else if (sense==OptSense::Minimize) {
+        if (level==WeightLevel::Action) return CalcOptPolicyActionSecondMomentMin(idxW, mean);
+        if (level==WeightLevel::Transition) return CalcOptPolicyTransitionSecondMomentMin(idxW, mean);
+    }
+    throw runtime_error("Bellman operator not implemented.");
+}
+
+void HMDP::CalcPolicy(BellmanOp op, idx idxW, flt g, idx idxDur, flt discountF) {
+    if (op==BellmanOp::TransPr || op==BellmanOp::DiscountedTransPr) {
+        CalcPolicy(op, WeightLevel::Action, idxW, g, idxDur, discountF);
+        return;
+    }
+    WeightLevel level = ValidateGlobalWeightForOp(op, idxW);
+    idx localIdxW = LocalWeightIdx(level, idxW);
+    CalcPolicy(op, level, localIdxW, g, idxDur, discountF);
+}
+
+// Dispatch fixed-policy evaluation to a specialized Bellman implementation.
+void HMDP::CalcPolicy(BellmanOp op, WeightLevel level, idx idxW, flt g, idx idxDur, flt discountF) {
+    if (level==WeightLevel::Transition && op!=BellmanOp::Expected && op!=BellmanOp::Min && op!=BellmanOp::Max && op!=BellmanOp::SecondMoment && op!=BellmanOp::Variance) {
+        throw runtime_error("Transition-level weights are not supported for " + BellmanOpName(op) + ".");
+    }
+    if (op==BellmanOp::Expected && level==WeightLevel::Action) {
+        CalcPolicyActionWeight(idxW);
+        return;
+    }
+    if (op==BellmanOp::Expected && level==WeightLevel::Transition) {
+        CalcPolicyTransitionWeight(idxW);
+        return;
+    }
+    if (op==BellmanOp::Min && level==WeightLevel::Action) {
+        CalcPolicyMinActionWeight(idxW);
+        return;
+    }
+    if (op==BellmanOp::Min && level==WeightLevel::Transition) {
+        CalcPolicyMinTransitionWeight(idxW);
+        return;
+    }
+    if (op==BellmanOp::Max && level==WeightLevel::Action) {
+        CalcPolicyMaxActionWeight(idxW);
+        return;
+    }
+    if (op==BellmanOp::Max && level==WeightLevel::Transition) {
+        CalcPolicyMaxTransitionWeight(idxW);
+        return;
+    }
+    if (op==BellmanOp::SecondMoment && level==WeightLevel::Action) {
+        CalcPolicyActionSecondMoment(idxW);
+        return;
+    }
+    if (op==BellmanOp::SecondMoment && level==WeightLevel::Transition) {
+        CalcPolicyTransitionSecondMoment(idxW);
+        return;
+    }
+    if (op==BellmanOp::Variance && level==WeightLevel::Action) {
+        CalcPolicyActionVariance(idxW);
+        return;
+    }
+    if (op==BellmanOp::Variance && level==WeightLevel::Transition) {
+        CalcPolicyTransitionVariance(idxW);
+        return;
+    }
+    if (op==BellmanOp::Average && level==WeightLevel::Action) {
+        CalcPolicyActionAverageWeight(idxW, g, idxDur);
+        return;
+    }
+    if (op==BellmanOp::Discounted && level==WeightLevel::Action) {
+        CalcPolicyActionDiscountedWeight(idxW, idxDur, discountF);
+        return;
+    }
+    if (op==BellmanOp::TransPr && level==WeightLevel::Action) {
+        CalcPolicyActionTransPr();
+        return;
+    }
+    if (op==BellmanOp::DiscountedTransPr && level==WeightLevel::Action) {
+        CalcPolicyActionDiscountedTransPr(idxDur, discountF);
+        return;
+    }
+    throw runtime_error("Bellman operator not implemented.");
+}
+
+// Evaluate the current policy using action weights.
+void HMDP::CalcPolicyActionWeight(idx idxW) {
+    CheckActionWeightsAvailable(idxW);
+    flt wTmp;
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (GetActionSize(iteS)>0) {
+            action_iterator iteA = GetIte(iteS, iteS->pred);
+            // Action weight means r(s,a): add it once, outside the transition loop.
+            wTmp = iteA->w[idxW];
+            for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                wTmp += iteT->pr * states[iteT->id].w;
+            }
+            iteS->w = wTmp;
+        }
+    }
+}
+
+// Evaluate the current policy using transition weights.
+void HMDP::CalcPolicyTransitionWeight(idx idxW) {
+    CheckTransitionWeightsAvailable(idxW);
+    flt wTmp;
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (ExternalState(iteS)) throw runtime_error("Transition-level weights are not implemented for external process states.");
+        if (GetActionSize(iteS)>0) {
+            action_iterator iteA = GetIte(iteS, iteS->pred);
+            wTmp = 0;
+            for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                // Transition weight means r(s,a,s'): add it per transition.
+                wTmp += iteT->pr * (iteT->w[idxW] + states[iteT->id].w);
+            }
+            iteS->w = wTmp;
+        }
+    }
+}
+
+void HMDP::CalcPolicyActionSecondMoment(idx idxW) {
+    CheckActionWeightsAvailable(idxW);
+    vector<flt> mean;
+    CalcPolicyActionMean(idxW, mean);
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (GetActionSize(iteS)==0) iteS->w = mean[GetId(iteS)] * mean[GetId(iteS)];
+    }
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (GetActionSize(iteS)>0) {
+            action_iterator iteA = GetIte(iteS, iteS->pred);
+            flt qTmp = 0;
+            for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                flt y = iteA->w[idxW];
+                qTmp += iteT->pr * (y * y + 2 * y * mean[iteT->id] + states[iteT->id].w);
+            }
+            iteS->w = qTmp;
+        }
+    }
+}
+
+void HMDP::CalcPolicyTransitionSecondMoment(idx idxW) {
+    CheckTransitionWeightsAvailable(idxW);
+    vector<flt> mean;
+    CalcPolicyTransitionMean(idxW, mean);
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (GetActionSize(iteS)==0) iteS->w = mean[GetId(iteS)] * mean[GetId(iteS)];
+    }
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (ExternalState(iteS)) throw runtime_error("Transition-level weights are not implemented for external process states.");
+        if (GetActionSize(iteS)>0) {
+            action_iterator iteA = GetIte(iteS, iteS->pred);
+            flt qTmp = 0;
+            for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                flt y = iteT->w[idxW];
+                qTmp += iteT->pr * (y * y + 2 * y * mean[iteT->id] + states[iteT->id].w);
+            }
+            iteS->w = qTmp;
+        }
+    }
+}
+
+void HMDP::CalcPolicyActionVariance(idx idxW) {
+    CheckActionWeightsAvailable(idxW);
+    vector<flt> mean;
+    CalcPolicyActionMean(idxW, mean);
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (GetActionSize(iteS)==0) iteS->w = 0;
+    }
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (GetActionSize(iteS)>0) {
+            idx iS = GetId(iteS);
+            action_iterator iteA = GetIte(iteS, iteS->pred);
+            flt vTmp = 0;
+            flt uCur = mean[iS];
+            for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                flt y = iteA->w[idxW];
+                flt centered = y + mean[iteT->id] - uCur;
+                vTmp += iteT->pr * (states[iteT->id].w + centered * centered);
+            }
+            iteS->w = vTmp;
+        }
+    }
+}
+
+void HMDP::CalcPolicyTransitionVariance(idx idxW) {
+    CheckTransitionWeightsAvailable(idxW);
+    vector<flt> mean;
+    CalcPolicyTransitionMean(idxW, mean);
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (GetActionSize(iteS)==0) iteS->w = 0;
+    }
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (ExternalState(iteS)) throw runtime_error("Transition-level weights are not implemented for external process states.");
+        if (GetActionSize(iteS)>0) {
+            idx iS = GetId(iteS);
+            action_iterator iteA = GetIte(iteS, iteS->pred);
+            flt vTmp = 0;
+            flt uCur = mean[iS];
+            for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                flt y = iteT->w[idxW];
+                flt centered = y + mean[iteT->id] - uCur;
+                vTmp += iteT->pr * (states[iteT->id].w + centered * centered);
+            }
+            iteS->w = vTmp;
+        }
+    }
+}
+
+// Evaluate the current policy using action weights and the worst feasible successor.
+void HMDP::CalcPolicyMinActionWeight(idx idxW) {
+    CheckActionWeightsAvailable(idxW);
+    flt wTmp;
+    flt inner;
+    bool hasNext;
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (GetActionSize(iteS)>0) {
+            action_iterator iteA = GetIte(iteS, iteS->pred);
+            inner = INF;
+            hasNext = false;
+            for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                if (iteT->pr<=0) continue;
+                hasNext = true;
+                inner = min(inner, states[iteT->id].w);
+            }
+            wTmp = iteA->w[idxW] + (hasNext ? inner : 0);
+            iteS->w = wTmp;
+        }
+    }
+}
+
+// Evaluate the current policy using transition weights and the worst feasible successor.
+void HMDP::CalcPolicyMinTransitionWeight(idx idxW) {
+    CheckTransitionWeightsAvailable(idxW);
+    flt wTmp;
+    bool hasNext;
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (ExternalState(iteS)) throw runtime_error("Transition-level weights are not implemented for external process states.");
+        if (GetActionSize(iteS)>0) {
+            action_iterator iteA = GetIte(iteS, iteS->pred);
+            wTmp = INF;
+            hasNext = false;
+            for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                if (iteT->pr<=0) continue;
+                hasNext = true;
+                wTmp = min(wTmp, iteT->w[idxW] + states[iteT->id].w);
+            }
+            iteS->w = hasNext ? wTmp : 0;
+        }
+    }
+}
+
+// Evaluate the current policy using action weights and the best feasible successor.
+void HMDP::CalcPolicyMaxActionWeight(idx idxW) {
+    CheckActionWeightsAvailable(idxW);
+    flt wTmp;
+    flt inner;
+    bool hasNext;
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (GetActionSize(iteS)>0) {
+            action_iterator iteA = GetIte(iteS, iteS->pred);
+            inner = -INF;
+            hasNext = false;
+            for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                if (iteT->pr<=0) continue;
+                hasNext = true;
+                inner = max(inner, states[iteT->id].w);
+            }
+            wTmp = iteA->w[idxW] + (hasNext ? inner : 0);
+            iteS->w = wTmp;
+        }
+    }
+}
+
+// Evaluate the current policy using transition weights and the best feasible successor.
+void HMDP::CalcPolicyMaxTransitionWeight(idx idxW) {
+    CheckTransitionWeightsAvailable(idxW);
+    flt wTmp;
+    bool hasNext;
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (ExternalState(iteS)) throw runtime_error("Transition-level weights are not implemented for external process states.");
+        if (GetActionSize(iteS)>0) {
+            action_iterator iteA = GetIte(iteS, iteS->pred);
+            wTmp = -INF;
+            hasNext = false;
+            for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                if (iteT->pr<=0) continue;
+                hasNext = true;
+                wTmp = max(wTmp, iteT->w[idxW] + states[iteT->id].w);
+            }
+            iteS->w = hasNext ? wTmp : 0;
+        }
+    }
+}
+
+// Evaluate the current policy using action-level average weights.
+void HMDP::CalcPolicyActionAverageWeight(idx idxW, flt g, idx idxDur) {
+    CheckActionWeightsAvailable(idxW);
+    CheckActionWeightsAvailable(idxDur);
+    flt wTmp;
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (GetActionSize(iteS)>0) {
+            action_iterator iteA = GetIte(iteS, iteS->pred);
+            wTmp = iteA->w[idxW] - iteA->w[idxDur] * g;
+            for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                wTmp += iteT->pr * states[iteT->id].w;
+            }
+            iteS->w = wTmp;
+        }
+    }
+}
+
+// Evaluate the current policy using action-level discounted weights.
+void HMDP::CalcPolicyActionDiscountedWeight(idx idxW, idx idxDur, flt discountF) {
+    CheckActionWeightsAvailable(idxW);
+    CheckActionWeightsAvailable(idxDur);
+    flt wTmp;
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (GetActionSize(iteS)>0) {
+            action_iterator iteA = GetIte(iteS, iteS->pred);
+            wTmp = 0;
+            for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                wTmp += iteT->pr * states[iteT->id].w;
+            }
+            iteS->w = wTmp * pow(discountF, iteA->w[idxDur]) + iteA->w[idxW];
+        }
+    }
+}
+
+// Evaluate the current policy using transition probabilities.
+void HMDP::CalcPolicyActionTransPr() {
+    flt wTmp;
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (GetActionSize(iteS)>0) {
+            action_iterator iteA = GetIte(iteS, iteS->pred);
+            wTmp = 0;
+            for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                wTmp += iteT->pr * states[iteT->id].w;
+            }
+            iteS->w = wTmp;
+        }
+    }
+}
+
+// Evaluate the current policy using discounted transition probabilities.
+void HMDP::CalcPolicyActionDiscountedTransPr(idx idxDur, flt discountF) {
+    CheckActionWeightsAvailable(idxDur);
+    flt wTmp;
+    for(state_iterator iteS = state_begin(); iteS!=state_end(); ++iteS) {
+        if (GetActionSize(iteS)>0) {
+            action_iterator iteA = GetIte(iteS, iteS->pred);
+            wTmp = 0;
+            for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) {
+                wTmp += iteT->pr * states[iteT->id].w;
+            }
+            iteS->w = wTmp * pow(discountF, iteA->w[idxDur]);
+        }
     }
 }
 
@@ -1002,6 +3128,8 @@ HMDPSave::HMDPSave(string prefix, HMDP * pHMDP){
     string actionWFileN = prefix + "actionWeight.bin";
     string actionWLblFileN = prefix + "actionWeightLbl.bin";
     string transProbFileN = prefix + "transProb.bin";
+    string transWFileN = prefix + "transWeight.bin";
+    string transWLblFileN = prefix + "transWeightLbl.bin";
     string externalProcessesFileN = prefix + "externalProcesses.bin";
     this->pHMDP = pHMDP;
 
@@ -1012,6 +3140,8 @@ HMDPSave::HMDPSave(string prefix, HMDP * pHMDP){
     pActionWFile = fopen(actionWFileN.c_str(), "wb");
     pActionWLblFile = fopen(actionWLblFileN.c_str(), "wb");
     pTransProbFile = fopen(transProbFileN.c_str(), "wb");
+    pTransWFile = fopen(transWFileN.c_str(), "wb");
+    pTransWLblFile = fopen(transWLblFileN.c_str(), "wb");
     pExternalProcessesFile = fopen(externalProcessesFileN.c_str(), "wb");
 
     CreateBinaryFiles();
@@ -1056,9 +3186,11 @@ void HMDPSave::CreateBinaryFiles() {
                     WriteBinary(pActionIdxFile, (int)iteT->id);
                 }
                 WriteBinary(pTransProbFile, iteT->pr);
+                WriteBinary(pTransWFile, iteT->w);
             }
             WriteBinary(pActionIdxFile, (int)-1);
             WriteBinary(pTransProbFile, (flt)-1);
+            WriteBinary(pTransWFile, (flt)-1);
             if (iteA->label.length()>0) {
                 WriteBinary(pActionIdxLblFile, ToString<int>(aId));
                 WriteBinary(pActionIdxLblFile, iteA->label);
@@ -1066,8 +3198,9 @@ void HMDPSave::CreateBinaryFiles() {
             WriteBinary(pActionWFile, iteA->GetW());
         }
     }
-    wLblLth=pHMDP->weightNames.size();
-    for (idx i=0;i<pHMDP->weightNames.size();i++) WriteBinary(pActionWLblFile, pHMDP->weightNames[i]);
+    wLblLth=pHMDP->weightActionNames.size();
+    for (idx i=0;i<pHMDP->weightActionNames.size();i++) WriteBinary(pActionWLblFile, pHMDP->weightActionNames[i]);
+    for (idx i=0;i<pHMDP->weightTransNames.size();i++) WriteBinary(pTransWLblFile, pHMDP->weightTransNames[i]);
     map<string,string>::iterator it;
     for (it=pHMDP->external.begin(); it!=pHMDP->external.end(); ++it) {
         WriteBinary(pExternalProcessesFile,it->first);
@@ -1093,6 +3226,8 @@ HMDPSave::~HMDPSave() {
   fclose(pActionWFile);
   fclose(pActionWLblFile);
   fclose(pTransProbFile);
+  fclose(pTransWFile);
+  fclose(pTransWLblFile);
   fclose(pExternalProcessesFile);
 }
 
@@ -1106,26 +3241,23 @@ vector<flt> HMDP::CalcSteadyStatePr() {
 		log << "Stady state probabilities can only be done be calculated on infinite time-horizon HMDPs!" << endl;
 		return v;
 	}
-	MatAlg matAlg; // Matrix routines
-	multimap<string, int >::iterator ite, iteZ;
-	MatSimple<double> b(rows,1),    // Matrix left hand side
-				   w(rows,1),       // Matrix of weights (the unknown)
-				   P(rows,rows);    // Matrix of prob values
-	MatSimple<double> I(rows,true); // identity
+	arma::vec b(rows),    // Vector left hand side
+              w(rows);    // Vector of weights (the unknown)
+	arma::mat P(rows, rows); // Matrix of prob values
 
 	log << "Calculate steady state probabilities:";
-	FounderPr(TransPr,P);
+	FounderPr(BellmanOp::TransPr,P);
 	//P.Print();
     // Now solve equations wP = w and w1=1 -> w(P-I) = 0 and w1=1 where P have been
     // calculated for the founder. This is equvivalent to solving
     // Qw=b where Q=(P-I)' and b=(0,...,0,1)' where last col in
     // (P-I) is replaced with 1.
-    matAlg.PMinusI(P);
-    for(idx j=0; j<(idx)rows; ++j) P(j,rows-1) = 1;
-    b.Set(0);
-    b(rows-1,0) = 1;
-    if (matAlg.LASolveT(P,w,b)) log << " Error: can not solve system equations. Is the model fulfilling the model assumptions (e.g. unichain)? " << endl;
-    v.assign(&w(0,0),&w(0,0)+rows);
+    P.diag() -= 1.0;
+    P.col(rows-1).ones();
+    b.zeros();
+    b(rows-1) = 1;
+    if (!arma::solve(w, P.t(), b)) log << " Error: can not solve system equations. Is the model fulfilling the model assumptions (e.g. unichain)? " << endl;
+    v.assign(w.memptr(), w.memptr()+rows);
     //cout << "r=" << endl << r << endl << "P=" << endl << P << endl << "w=" << endl << w << endl;
 	log << " finished." << endl;
     return v;

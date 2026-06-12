@@ -1,5 +1,4 @@
 library(MDP2)
-context("Check optimality")
 cleanUp<-function() unlink("*.bin")
 
 
@@ -21,10 +20,404 @@ test_that("Total reward",{
    rm(mdp)
 })
 
+test_that("Transition-level total reward",{
+   w <- binaryMDPWriter(prefix = "trans_reward_", getLog = FALSE)
+   w$setWeights(character())
+   w$setTransWeights("Transition reward")
+   w$process()
+      w$stage()
+         w$state()
+            w$action(weights = numeric(0),
+                     prob = c(1, 0, 0.25, 1, 1, 0.75),
+                     transWeights = c(10, 20))
+            w$endAction()
+         w$endState()
+      w$endStage()
+      w$stage()
+         w$state()
+         w$endState()
+         w$state()
+         w$endState()
+      w$endStage()
+   w$endProcess()
+   w$closeWriter()
+
+   mdp <- loadMDP("trans_reward_", getLog = FALSE)
+   expect_equal(mdp$weightActionNames, character())
+   expect_equal(mdp$weightTransNames, "Transition reward")
+   expect_error(
+      mdp$ptr$valueIte(0, 0, 1L, 0, 0L, 0L, c(0, 0), 0, 1),
+      "Transition-level weights are not supported for BellmanOp::Discounted"
+   )
+   runValueIte(mdp, "Transition reward", termValues = c(100, 200), getLog = FALSE)
+   policy <- getPolicy(mdp)
+   expect_equal(policy$weight[policy$stateStr == "0,0"], 192.5)
+   rm(mdp)
+})
+
+test_that("Global weight lookup rejects ambiguous names", {
+   mdp <- list(weightNames = c("Net", "Net reward"))
+   expect_equal(getWIdx(mdp, "Net"), 0)
+   expect_error(getWIdx(mdp, "e"), "ambiguous")
+})
+
+test_that("Value iteration supports minimization objective", {
+   w <- binaryMDPWriter(prefix = "sense_", getLog = FALSE)
+   w$setWeights("Cost")
+   w$process()
+      w$stage()
+         w$state()
+            w$action(weights = 10, prob = c(1, 0, 1), end = TRUE)
+            w$endAction()
+            w$action(weights = 1, prob = c(1, 0, 1), end = TRUE)
+            w$endAction()
+         w$endState()
+      w$endStage()
+      w$stage()
+         w$state()
+         w$endState()
+      w$endStage()
+   w$endProcess()
+   w$closeWriter()
+
+   mdp <- loadMDP("sense_", getLog = FALSE)
+   runValueIte(mdp, "Cost", termValues = 0, objective = "max", getLog = FALSE)
+   policy <- getPolicy(mdp)
+   expect_equal(policy$aIdx[policy$stateStr == "0,0"], 0)
+   expect_equal(policy$weight[policy$stateStr == "0,0"], 10)
+   expect_equal(getRPO(mdp, "Cost", iA = 0, sId = 1, objective = "max")$rpo, 9)
+
+   runValueIte(mdp, "Cost", termValues = 0, objective = "min", getLog = FALSE)
+   policy <- getPolicy(mdp)
+   expect_equal(policy$aIdx[policy$stateStr == "0,0"], 1)
+   expect_equal(policy$weight[policy$stateStr == "0,0"], 1)
+   expect_equal(getRPO(mdp, "Cost", iA = 1, sId = 1, objective = "min")$rpo, 9)
+})
+
+test_that("Value iteration supports minimum and maximum successor Bellman operators", {
+   w <- binaryMDPWriter(prefix = "minmax_", getLog = FALSE)
+   w$setWeights("Weight")
+   w$setTransWeights("Trans weight")
+   w$process()
+      w$stage()
+         w$state()
+            w$action(weights = 0,
+                     prob = c(1, 0, 0.5, 1, 1, 0.5),
+                     transWeights = c(100, 0))
+            w$endAction()
+            w$action(weights = 5,
+                     prob = c(1, 0, 1),
+                     transWeights = 5)
+            w$endAction()
+         w$endState()
+      w$endStage()
+      w$stage()
+         w$state()
+         w$endState()
+         w$state()
+         w$endState()
+      w$endStage()
+   w$endProcess()
+   w$closeWriter()
+
+   mdp <- loadMDP("minmax_", getLog = FALSE)
+
+   runValueIte(mdp, "Weight", termValues = c(1, 10), bellmanOp = "min", objective = "max", getLog = FALSE)
+   policy <- getPolicy(mdp)
+   expect_equal(policy$aIdx[policy$stateStr == "0,0"], 1)
+   expect_equal(policy$weight[policy$stateStr == "0,0"], 6)
+
+   runValueIte(mdp, "Weight", termValues = c(1, 10), bellmanOp = "max", objective = "max", getLog = FALSE)
+   policy <- getPolicy(mdp)
+   expect_equal(policy$aIdx[policy$stateStr == "0,0"], 0)
+   expect_equal(policy$weight[policy$stateStr == "0,0"], 10)
+
+   runValueIte(mdp, "Weight", termValues = c(1, 10), bellmanOp = "min", objective = "min", getLog = FALSE)
+   policy <- getPolicy(mdp)
+   expect_equal(policy$aIdx[policy$stateStr == "0,0"], 0)
+   expect_equal(policy$weight[policy$stateStr == "0,0"], 1)
+
+   runValueIte(mdp, "Weight", termValues = c(1, 10), bellmanOp = "max", objective = "min", getLog = FALSE)
+   policy <- getPolicy(mdp)
+   expect_equal(policy$aIdx[policy$stateStr == "0,0"], 1)
+   expect_equal(policy$weight[policy$stateStr == "0,0"], 6)
+
+   runValueIte(mdp, "Trans weight", termValues = c(1, 10), bellmanOp = "min", objective = "max", getLog = FALSE)
+   policy <- getPolicy(mdp)
+   expect_equal(policy$aIdx[policy$stateStr == "0,0"], 0)
+   expect_equal(policy$weight[policy$stateStr == "0,0"], 10)
+
+   runValueIte(mdp, "Trans weight", termValues = c(1, 10), bellmanOp = "max", objective = "max", getLog = FALSE)
+   policy <- getPolicy(mdp)
+   expect_equal(policy$aIdx[policy$stateStr == "0,0"], 0)
+   expect_equal(policy$weight[policy$stateStr == "0,0"], 101)
+})
+
+test_that("SecondMoment supports action-level weights", {
+   w <- binaryMDPWriter(prefix = "second_moment_action_", getLog = FALSE)
+   w$setWeights("Weight")
+   w$process()
+      w$stage()
+         w$state()
+            w$action(label = "high", weights = 2, prob = c(1, 0, 1), end = TRUE)
+            w$endAction()
+            w$action(label = "low", weights = 1, prob = c(1, 1, 1), end = TRUE)
+            w$endAction()
+         w$endState()
+      w$endStage()
+      w$stage()
+         w$state()
+            w$action(weights = 3, prob = c(1, 0, 1), end = TRUE)
+            w$endAction()
+         w$endState()
+         w$state()
+            w$action(weights = 0, prob = c(1, 0, 1), end = TRUE)
+            w$endAction()
+         w$endState()
+      w$endStage()
+      w$stage()
+         w$state()
+         w$endState()
+      w$endStage()
+   w$endProcess()
+   w$closeWriter()
+
+   mdp <- loadMDP("second_moment_action_", getLog = FALSE)
+
+   runValueIte(mdp, "Weight", termValues = 0, getLog = FALSE)
+   runCalcWeights(mdp, "Weight", criterion = "secondMoment", termValues = 0)
+   policy <- getPolicy(mdp)
+   expect_equal(policy$weight[policy$stateStr == "0,0"], 25)
+
+   runValueIte(mdp, "Weight", termValues = 0, bellmanOp = "secondMoment", objective = "max", getLog = FALSE)
+   policy <- getPolicy(mdp)
+   expect_equal(policy$aIdx[policy$stateStr == "0,0"], 0)
+   expect_equal(policy$weight[policy$stateStr == "0,0"], 25)
+
+   runValueIte(mdp, "Weight", termValues = 0, bellmanOp = "secondMoment", objective = "min", getLog = FALSE)
+   policy <- getPolicy(mdp)
+   expect_equal(policy$aIdx[policy$stateStr == "0,0"], 1)
+   expect_equal(policy$weight[policy$stateStr == "0,0"], 1)
+})
+
+test_that("SecondMoment supports transition-level weights", {
+   w <- binaryMDPWriter(prefix = "second_moment_transition_", getLog = FALSE)
+   w$setWeights(character())
+   w$setTransWeights("Weight")
+   w$process()
+      w$stage()
+         w$state()
+            w$action(label = "high", weights = numeric(0), prob = c(1, 0, 1),
+                     transWeights = 2, end = TRUE)
+            w$endAction()
+            w$action(label = "low", weights = numeric(0), prob = c(1, 1, 1),
+                     transWeights = 1, end = TRUE)
+            w$endAction()
+         w$endState()
+      w$endStage()
+      w$stage()
+         w$state()
+            w$action(weights = numeric(0), prob = c(1, 0, 1),
+                     transWeights = 3, end = TRUE)
+            w$endAction()
+         w$endState()
+         w$state()
+            w$action(weights = numeric(0), prob = c(1, 0, 1),
+                     transWeights = 0, end = TRUE)
+            w$endAction()
+         w$endState()
+      w$endStage()
+      w$stage()
+         w$state()
+         w$endState()
+      w$endStage()
+   w$endProcess()
+   w$closeWriter()
+
+   mdp <- loadMDP("second_moment_transition_", getLog = FALSE)
+
+   runValueIte(mdp, "Weight", termValues = 0, getLog = FALSE)
+   runCalcWeights(mdp, "Weight", criterion = "secondMoment", termValues = 0)
+   policy <- getPolicy(mdp)
+   expect_equal(policy$weight[policy$stateStr == "0,0"], 25)
+
+   runValueIte(mdp, "Weight", termValues = 0, bellmanOp = "secondMoment", objective = "max", getLog = FALSE)
+   policy <- getPolicy(mdp)
+   expect_equal(policy$aIdx[policy$stateStr == "0,0"], 0)
+   expect_equal(policy$weight[policy$stateStr == "0,0"], 25)
+
+   runValueIte(mdp, "Weight", termValues = 0, bellmanOp = "secondMoment", objective = "min", getLog = FALSE)
+   policy <- getPolicy(mdp)
+   expect_equal(policy$aIdx[policy$stateStr == "0,0"], 1)
+   expect_equal(policy$weight[policy$stateStr == "0,0"], 1)
+})
+
+test_that("SecondMoment value iteration is finite-horizon only", {
+   source("files/two_level_hmdp.R")
+   mdp <- loadMDP("2lev_", getLog = FALSE)
+   runValueIte(mdp, "Net reward", "Duration", bellmanOp = "secondMoment", termValues = rep(0, mdp$founderStatesLast), getLog = FALSE)
+   expect_match(mdp$ptr$getLog(), "SecondMoment value iteration is currently only supported for finite time-horizon HMDPs")
+})
+
+test_that("Variance supports action-level fixed-policy evaluation", {
+   w <- binaryMDPWriter(prefix = "variance_action_", getLog = FALSE)
+   w$setWeights("Weight")
+   w$process()
+      w$stage()
+         w$state()
+            w$action(weights = 1, prob = c(1, 0, 0.5, 1, 1, 0.5), end = TRUE)
+            w$endAction()
+         w$endState()
+      w$endStage()
+      w$stage()
+         w$state()
+            w$action(weights = 0, prob = c(1, 0, 1), end = TRUE)
+            w$endAction()
+         w$endState()
+         w$state()
+            w$action(weights = 2, prob = c(1, 0, 1), end = TRUE)
+            w$endAction()
+         w$endState()
+      w$endStage()
+      w$stage()
+         w$state()
+         w$endState()
+      w$endStage()
+   w$endProcess()
+   w$closeWriter()
+
+   mdp <- loadMDP("variance_action_", getLog = FALSE)
+   runValueIte(mdp, "Weight", termValues = 0, getLog = FALSE)
+
+   mdp$ptr$setTerminalW(0)
+   runCalcWeights(mdp, "Weight", criterion = "expected", termValues = 0)
+   expected <- getPolicy(mdp)$weight
+
+   mdp$ptr$setTerminalW(0)
+   runCalcWeights(mdp, "Weight", criterion = "secondMoment", termValues = 0)
+   second_moment <- getPolicy(mdp)$weight
+
+   runCalcWeights(mdp, "Weight", criterion = "variance", termValues = 0)
+   variance <- getPolicy(mdp)$weight
+
+   s0 <- getPolicy(mdp)$stateStr == "0,0"
+   expect_equal(variance[s0], 1)
+   expect_equal(variance, second_moment - expected^2)
+})
+
+test_that("Variance supports transition-level fixed-policy evaluation", {
+   w <- binaryMDPWriter(prefix = "variance_transition_", getLog = FALSE)
+   w$setWeights(character())
+   w$setTransWeights("Weight")
+   w$process()
+      w$stage()
+         w$state()
+            w$action(weights = numeric(0), prob = c(1, 0, 0.5, 1, 1, 0.5),
+                     transWeights = c(1, 1), end = TRUE)
+            w$endAction()
+         w$endState()
+      w$endStage()
+      w$stage()
+         w$state()
+            w$action(weights = numeric(0), prob = c(1, 0, 1),
+                     transWeights = 0, end = TRUE)
+            w$endAction()
+         w$endState()
+         w$state()
+            w$action(weights = numeric(0), prob = c(1, 0, 1),
+                     transWeights = 2, end = TRUE)
+            w$endAction()
+         w$endState()
+      w$endStage()
+      w$stage()
+         w$state()
+         w$endState()
+      w$endStage()
+   w$endProcess()
+   w$closeWriter()
+
+   mdp <- loadMDP("variance_transition_", getLog = FALSE)
+   runValueIte(mdp, "Weight", termValues = 0, getLog = FALSE)
+
+   mdp$ptr$setTerminalW(0)
+   runCalcWeights(mdp, "Weight", criterion = "expected", termValues = 0)
+   expected <- getPolicy(mdp)$weight
+
+   mdp$ptr$setTerminalW(0)
+   runCalcWeights(mdp, "Weight", criterion = "secondMoment", termValues = 0)
+   second_moment <- getPolicy(mdp)$weight
+
+   runCalcWeights(mdp, "Weight", criterion = "variance", termValues = 0)
+   variance <- getPolicy(mdp)$weight
+
+   s0 <- getPolicy(mdp)$stateStr == "0,0"
+   expect_equal(variance[s0], 1)
+   expect_equal(variance, second_moment - expected^2)
+})
+
+test_that("Variance uses terminal values as means and terminal variance zero", {
+   w <- binaryMDPWriter(prefix = "variance_terminal_", getLog = FALSE)
+   w$setWeights("Weight")
+   w$process()
+      w$stage()
+         w$state()
+            w$action(weights = 0, prob = c(1, 0, 0.5, 1, 1, 0.5), end = TRUE)
+            w$endAction()
+         w$endState()
+      w$endStage()
+      w$stage()
+         w$state()
+         w$endState()
+         w$state()
+         w$endState()
+      w$endStage()
+   w$endProcess()
+   w$closeWriter()
+
+   mdp <- loadMDP("variance_terminal_", getLog = FALSE)
+   runValueIte(mdp, "Weight", termValues = c(0, 2), getLog = FALSE)
+   runCalcWeights(mdp, "Weight", criterion = "variance", termValues = c(0, 2))
+   policy <- getPolicy(mdp)
+
+   expect_equal(policy$weight[policy$stateStr == "0,0"], 1)
+   expect_equal(policy$weight[policy$stateStr == "1,0"], 0)
+   expect_equal(policy$weight[policy$stateStr == "1,1"], 0)
+})
+
+test_that("Variance is not a value-iteration Bellman operator", {
+   w <- binaryMDPWriter(prefix = "variance_not_value_ite_", getLog = FALSE)
+   w$setWeights("Weight")
+   w$process()
+      w$stage()
+         w$state()
+            w$action(weights = 1, prob = c(1, 0, 1), end = TRUE)
+            w$endAction()
+         w$endState()
+      w$endStage()
+      w$stage()
+         w$state()
+         w$endState()
+      w$endStage()
+   w$endProcess()
+   w$closeWriter()
+
+   mdp <- loadMDP("variance_not_value_ite_", getLog = FALSE)
+   expect_error(
+      runValueIte(mdp, "Weight", termValues = 0, bellmanOp = "variance", getLog = FALSE),
+      "should be one of"
+   )
+   expect_error(
+      mdp$ptr$calcRPO(8, 0, as.integer(c(0)), 0L, as.integer(c(0)), 0, 0L, 1),
+      "Bellman operator not implemented"
+   )
+})
+
 
 test_that("Long run average reward",{
    source("files/two_level_hmdp.R")
    mdp<-loadMDP("2lev_", getLog = FALSE)
+   expect_lt(mdp$ptr$policyIteFixedPolicy(1L, 0L, 1L, 1), -1e+15)
+   expect_match(mdp$ptr$getLog(), "valid fixed policy must be set")
    expect_equal(runPolicyIteAve(mdp,"Net reward","Duration", getLog = FALSE), 5.71428571428571441259691710001789033412933349609375)
    expect_equal(runPolicyIteAve(mdp,"Net reward","Items", getLog = FALSE), 4)
    expect_equal(runPolicyIteAve(mdp,"Items","Duration", getLog = FALSE), 2.71428571428571441259691710001789033412933349609375)

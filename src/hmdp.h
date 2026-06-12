@@ -11,10 +11,10 @@
 #include <queue>
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
+#include <RcppArmadillo.h>
 #include "timer.h"
 #include "basicdt.h"
-#include "matrix.h"    // simple matrix class
-#include "matalg.h"    // linear equations solver using lapack
 
 #include <stdlib.h>     // For use of exit command
 // #include <stdio.h>      // For use of scanf
@@ -25,8 +25,12 @@ using namespace std;
 
 //-----------------------------------------------------------------------------
 
-/** Transition in and action.
- * Container for id of state and trans pr.
+class HMDPBuilder;
+
+/** 
+ * @brief Transition in an action.
+ * 
+ * Container for id of state and transition probability.
  */
 class HMDPTrans {
     friend class HMDPReader;
@@ -35,33 +39,49 @@ class HMDPTrans {
     friend class HMDPSave;
 
 public:
-    /** Create new HMDPTrans. */
-    HMDPTrans(idx idS, flt prS) {
+    /**
+     * @brief Create new HMDPTrans. 
+     * @param idS Id of state.
+     * @param prS Transition probability.
+     * @param weights Transition-level weights.
+     */
+    HMDPTrans(idx idS, flt prS, const vector<flt> & weights = vector<flt>()) {
         id = idS;
         pr = prS;
+        w = weights;
     }
 
-    /** For comparing HMDPTrans objects when sort them against id. */
+    /** 
+     * @brief For comparing HMDPTrans objects when sorting them against id. 
+     * @param rhs The other HMDPTrans object.
+     * @return True if this id is smaller.
+     */
     bool operator< (const HMDPTrans & rhs) const {
        return id < rhs.id;
     }
 
 private:
-    /** Print the transition. */
+    /** 
+     * @brief Print the transition. 
+     * @return String representation.
+     */
     string Print() {
         ostringstream out;
-        out << "(" << id << ", " << pr << ")";
+        out << "(" << id << ", " << pr << ", w = " << vec2String(w) << ")";
         return out.str();
     }
 
 private:
     idx id; ///< Id of transition state.
     flt pr; ///< Transition probability.
+    vector<flt> w; ///< Transition-level weights r(s,a,s').
 };
 
 //-----------------------------------------------------------------------------
 
-/** Action of a state. */
+/** 
+ * @brief Action of a state. 
+ */
 class HMDPAction {
     friend class HMDPReader;
     friend class HMDPState;
@@ -70,7 +90,10 @@ class HMDPAction {
 
  public:
 
-    /** Print the action. */
+    /** 
+     * @brief Print the action. 
+     * @return String representation.
+     */
     string Print() {
         ostringstream out;
         out << "(" << label << ") trans: ";
@@ -83,63 +106,100 @@ class HMDPAction {
 
 // Get functions --------------------------------------------------------------
 
-    /** Return vector with transition pr. */
+    /** 
+     * @brief Return vector with transition probabilities. 
+     * @return Vector of probabilities.
+     */
     vector<flt> GetTransPr() {
         vector<flt> v;
         for (idx i=0; i<trans.size(); i++) v.push_back(trans[i].pr);
         return v;
     }
 
-    /** Return vector with transition state ids. */
+    /** 
+     * @brief Return vector with transition state ids. 
+     * @return Vector of ids.
+     */
     vector<idx> GetTransIds() {
         vector<idx> v;
         for (idx i=0; i<trans.size(); i++) v.push_back(trans[i].id);
         return v;
     }
 
-    /** Return vector with weights. */
+    /** 
+     * @brief Return vector with action weights. 
+     * @return Vector of weights.
+     */
     vector<flt> GetW() {
         return w;
     }
 
-    /** Return label. */
+    /** 
+     * @brief Return transition-level weights for all transitions. 
+     * @return Vector of weights.
+     */
+    vector<flt> GetTransW() {
+        vector<flt> v;
+        for (idx i=0; i<trans.size(); i++) {
+            v.insert(v.end(), trans[i].w.begin(), trans[i].w.end());
+        }
+        return v;
+    }
+
+    /** 
+     * @brief Return action label. 
+     * @return The label.
+     */
     string GetLabel() {
         return label;
     }
 
  private:
 
-    /** Create an action. */
-    HMDPAction(vector<idx> & iStates, vector<flt> & transPr, vector<flt> & weights, string & lbl) {
+    /** 
+     * @brief Create an action. 
+     * @param iStates Transition states.
+     * @param transPr Transition probabilities.
+     * @param weights Action weights.
+     * @param transWeights Transition-level weights.
+     * @param lbl Action label.
+     */
+    HMDPAction(vector<idx> & iStates, vector<flt> & transPr, vector<flt> & weights,
+               vector< vector<flt> > & transWeights, string & lbl) {
         label = lbl;
         w = weights;
-        AddTransPr(iStates,transPr);
+        AddTransPr(iStates,transPr,transWeights);
     }
 
 
-    /** Add transition probabilities to the action.
-     * \param id Index of transition states.
-     * \param pr The probabilities.
+    /** 
+     * @brief Add transition probabilities to the action.
+     * @param id Index of transition states.
+     * @param pr The probabilities.
+     * @param transWeights Transition-level weights.
      */
-    void AddTransPr(vector<idx> & id, vector<flt> & pr) {
+    void AddTransPr(vector<idx> & id, vector<flt> & pr, vector< vector<flt> > & transWeights) {
         for (idx i=0; i<pr.size(); ++i) {
-            trans.push_back(HMDPTrans(id[i],pr[i]));
+            if (i<transWeights.size()) trans.push_back(HMDPTrans(id[i],pr[i],transWeights[i]));
+            else trans.push_back(HMDPTrans(id[i],pr[i]));
         }
     }
 
 // Set functions --------------------------------------------------------------
 
-    /** Set all trans pr to a value. */
+    /** 
+     * @brief Set all transition probabilities to a value. 
+     * @param val The value.
+     */
     void SetAllTransPr(flt val) {
         for(idx i=0; i<trans.size(); ++i) trans[i].pr = val;
     }
 
-    /** Set transition probability of an existing trans
-     * \param id Index of transition state.
-     * \param pr The probability.
-     * \pre Trans must have been sorted.
-     * \post Search for id and if found change pr.
-     * \return Old trans pr value (if not found -1).
+    /** 
+     * @brief Set transition probability of an existing transition.
+     * @param id Index of transition state.
+     * @param pr The probability.
+     * @return Old transition probability value (if not found -1).
      */
     flt SetTransPr(idx & id, flt & pr) {
         pair< vector<HMDPTrans>::iterator, vector<HMDPTrans>::iterator> bounds;
@@ -151,8 +211,8 @@ class HMDPAction {
         return old;
     }
 
-    /** Sort trans pr increasing in id.
-     * /pre All trans pr have been added.
+    /** 
+     * @brief Sort transition probabilities increasing in id.
      */
     void Sort() {
         sort(trans.begin(), trans.end());
@@ -164,36 +224,58 @@ class HMDPAction {
     trans_iterator end() { return trans.end(); }
 
 private:
-    vector<flt> w;    ///< Weights/quantities for the action.
+    vector<flt> w;    ///< Action-level weights r(s,a).
     string label;     ///< Action label.
     vector<HMDPTrans> trans;     ///< Transitions.
 };
 
 //-----------------------------------------------------------------------------
 
-/** A state in the HMDP. */
+/** 
+ * @brief A state in the HMDP. 
+ */
 class HMDPState {
     friend class HMDPReader;
     friend class HMDP;
     friend class HMDPSave;
 
  private:
+    /** 
+     * @brief Create a state with a label. 
+     * @param lbl The label.
+     */
     HMDPState(const string & lbl) {
         label = lbl;
         pred = -1;
         w = 0;
     }
 
+    /** 
+     * @brief Default constructor. 
+     */
     HMDPState() {
         pred = -1;
         w = 0;
     }
 
 // Add methods --------------
-    void AddAction(vector<flt> & w, vector<idx> & tails, vector<flt> & pr, string & label) {
-        actions.push_back(HMDPAction(tails,pr,w,label));
+    /** 
+     * @brief Add an action to the state.
+     * @param w Action weights.
+     * @param tails Transition states.
+     * @param pr Transition probabilities.
+     * @param transW Transition-level weights.
+     * @param label Action label.
+     */
+    void AddAction(vector<flt> & w, vector<idx> & tails, vector<flt> & pr,
+                   vector< vector<flt> > & transW, string & label) {
+        actions.push_back(HMDPAction(tails,pr,w,transW,label));
     }
 
+    /** 
+     * @brief Print the state. 
+     * @return String representation.
+     */
     string Print() {
         ostringstream out;
         out << "(" << label << ")";
@@ -209,38 +291,31 @@ class HMDPState {
 private:
     vector<HMDPAction> actions;  ///< Actions of the state.
     string label;   ///< State label.
-    flt w;          ///< Weight/reward for the state.
+    flt w;          ///< Weight for the state.
     int pred;   ///< Index of predecessor action (negative if not allocated).
 };
 
 //-----------------------------------------------------------------------------
 
-/** HMDP class.
-
-Contains an vector \code states of HMDPstate objects.
-
-Structure:
-    - The \code{states} vector satisfy that 1) states are ordered according to a
-      valid ordering 2) states are ordered such that they lie constitutively in
-      memory for a given stage.
-    - A map \code{stages} is used identify stages. The string of a stage, return
-      a pair (first id in \code{states}, number of states (size)), i.e. you may
-      scan \code{states} from \code{states[id]} to \code{size-1} to find states
-      of the stage.
-    - A HMDPstate contains a vector of HMDPActions
-    - A HMDPAction contains a vector of HMDPtrans which are sorted according to state id
-    - A HMDPTrans contain the id of the stage and the transition pr
-
-
-NOTE when a HMDP is built from binary files the id's to identify states in the
-binary files will not be the same as the id's in \code{states}. After the HMDP
-is built it is not a good idea to add new states since this will invalidate
-the properties of the \code{states} vector.
-
-Algorithms are include inside the class for easy call. However, only public
-methods and variables are used.
-
-\version{2.0}
+/** 
+ * @brief HMDP class.
+ *
+ * Contains a vector of HMDPState objects.
+ *
+ * Structure:
+ *   - The states vector satisfy that 1) states are ordered according to a
+ *     valid ordering 2) states are ordered such that they lie constitutively in
+ *     memory for a given stage.
+ *   - A map stages is used to identify stages. The string of a stage, returns
+ *     a pair (first id in states, number of states (size)).
+ *   - A HMDPState contains a vector of HMDPAction objects.
+ *   - A HMDPAction contains a vector of HMDPTrans objects which are sorted according to state id.
+ *   - A HMDPTrans contains the id of the stage, transition weights (if any) and the transition probability.
+ *
+ * NOTE when a HMDP is built from binary files the id's to identify states in the
+ * binary files will not be the same as the id's in states. After the HMDP
+ * is built it is not a good idea to add new states since this will invalidate
+ * the properties of the states vector.
  */
 class HMDP
 {
@@ -248,7 +323,46 @@ class HMDP
     friend class HMDPReader;
     friend class HMDPSave;
 
-    enum Crit {DiscountedReward, AverageReward, Reward, TransPr, TransPrDiscounted};    ///< Criterion used.
+    /** 
+     * @brief Bellman operator used by the specialized dynamic programming routines.
+     *
+     * The operator is dispatched once before entering the state/action/transition
+     * loops. This avoids virtual calls, function objects, and per-transition
+     * switches in the hot path.
+     */
+    enum class BellmanOp {
+        Discounted = 0,        ///< Discounted expected weight.
+        Average = 1,           ///< Long-run average expected weight.
+        Expected = 2,          ///< Total expected weight.
+        TransPr = 3,           ///< Transition probability Bellman operator.
+        DiscountedTransPr = 4, ///< Discounted transition probability Bellman operator.
+        Min = 5,               ///< Inner minimum over feasible successor states.
+        Max = 6,               ///< Inner maximum over feasible successor states.
+        SecondMoment = 7,      ///< Second moment of total weight.
+        Variance = 8           ///< Variance of total accumulated weight under a fixed policy.
+    };
+
+    /**
+     * @brief Optimization direction.
+     *
+     * BellmanOp describes the value recursion; OptSense controls whether policy
+     * improvement chooses the largest or smallest Bellman value.
+     */
+    enum class OptSense {
+        Maximize, ///< Choose the action with largest Bellman value.
+        Minimize  ///< Choose the action with smallest Bellman value.
+    };
+
+    /**
+     * @brief Storage level of the optimized weight.
+     *
+     * Action weights are stored on HMDPAction and represent r(s,a).
+     * Transition weights are stored on HMDPTrans and represent r(s,a,s').
+     */
+    enum class WeightLevel {
+        Action,     ///< Action-level weight r(s,a).
+        Transition  ///< Transition-level weight r(s,a,s').
+    };
 
 // Iterators --------------------------------------------------------------
     typedef HMDP* HMDPPtr;
@@ -278,17 +392,50 @@ class HMDP
 
 
 
-    /** Create a HMDP from binary files
+    /**
+     * @brief Create an empty HMDP.
+     * @param verbose_ Verbose output.
+     */
+    HMDP(bool verbose_)
+    {
+        verbose = verbose_;
+        okay = true;
+        externalProc = false;
+        levels = 0;
+        timeHorizon = 0;
+    }
+
+    /**
+     * @brief Create an empty HMDP.
+     */
+    HMDP()
+    {
+        verbose = false;
+        okay = true;
+        externalProc = false;
+        levels = 0;
+        timeHorizon = 0;
+    }
+
+    /**
+     * @brief Create a HMDP from binary files.
+     * @param binNames Vector of binary filenames.
+     * @param verbose_ Verbose output.
      */
     HMDP(vector<string> binNames, bool verbose_)
     {
         verbose = verbose_;
+        string transWFile = binNames.size()>8 ? binNames[8] : "";
+        string transWLblFile = binNames.size()>9 ? binNames[9] : "";
         LoadBin(binNames[0], binNames[1], binNames[2], binNames[3],
-                binNames[4],  binNames[5], binNames[6], binNames[7]);
+                binNames[4],  binNames[5], binNames[6], binNames[7],
+                transWFile, transWLblFile);
     }
 
 
-    /** Create a HMDP from binary files using the default names and a prefix
+    /**
+     * @brief Create a HMDP from binary files using the default names and a prefix.
+     * @param prefix Filename prefix.
      */
     HMDP(string prefix)
     {
@@ -302,25 +449,43 @@ class HMDP
         string actionWLblFile = prefix + "actionWeightLbl.bin";
         string transProbFile = prefix + "transProb.bin";
         string externalFile = prefix + "externalProcesses.bin";
+        string transWFile = prefix + "transWeight.bin";
+        string transWLblFile = prefix + "transWeightLbl.bin";
         LoadBin(stateIdxFile, stateIdxLblFile, actionIdxFile, actionIdxLblFile,
-                actionWFile,  actionWLblFile, transProbFile, externalFile);
+                actionWFile,  actionWLblFile, transProbFile, externalFile,
+                transWFile, transWLblFile);
     }
 
     //~HMDP() {cout << "Deconstructor called." << endl;}
 
-    /** Create a HMDP from binary files.
+    /**
+     * @brief Load HMDP from binary files.
+     * @param stateIdxFile State index file.
+     * @param stateIdxLblFile State label file.
+     * @param actionIdxFile Action index file.
+     * @param actionIdxLblFile Action label file.
+     * @param actionWFile Action weight file.
+     * @param actionWLblFile Action weight label file.
+     * @param transProbFile Transition probability file.
+     * @param externalFile External processes file.
+     * @param transWFile Transition weight file.
+     * @param transWLblFile Transition weight label file.
      */
     void LoadBin(string stateIdxFile, string stateIdxLblFile, string actionIdxFile,
         string actionIdxLblFile, string actionWFile,  string actionWLblFile,
-        string transProbFile, string externalFile);
+        string transProbFile, string externalFile,
+        string transWFile = "", string transWLblFile = "");
 
 
-    /** Check the HMDP for errors.
+    /**
+     * @brief Check the HMDP for errors.
+     *
      * The following are checked:
      * - Probabilities sum to one.
      * - That all transitions are to states which exists.
-     * \param eps The sum of the probabilities must at most differ eps from one.
-     * \return 0 if okay, 1 if warning, 2 if error.
+     *
+     * @param eps Maximum allowed difference from one for probabilities sum.
+     * @return 0 if okay, 1 if warning, 2 if error.
      */
     uSInt Check(flt eps);
 
@@ -347,58 +512,64 @@ class HMDP
 //
 //
 
-    /** Save the HMDP to binary files.
-     * \param prefix Prefix of the binary files.
+    /**
+     * @brief Save the HMDP to binary files.
+     * @param prefix Prefix of the binary files.
      */
     void Save2Binary(string prefix);
 
 
-    /** Given a set of external process states corresponding to the first stage in the external process,
-     * add the stage label of each external process to the states/nodes as its label.
+    /**
+     * @brief Add the stage label of each external process to the states/nodes as its label.
      */
     void ExternalAddStageStr();
 
 
-    /** Set external process states corresponding to the first stage in the
-     * external process to -INF.
+    /**
+     * @brief Set external process states corresponding to the first stage in the external process to -INF.
      */
     void ExternalResetStates();
 
 
-    /** Set the reward, duration and trans pr of external process actions to zero.
-     * \param idxW Index of the weight used.
-     * \param idxD Index of the duration.
+    /**
+     * @brief Set the weight, duration and transition probability of external process actions to zero.
+     * @param idxW Index of the weight used.
+     * @param idxD Index of the duration.
      */
     void ExternalResetActions(const idx & idxW, const idx & idxD);
 
 
-    /** Update external process states corresponding to the first stage in the external process.
-     * \param crit Criterion used (enum type).
-     * \param iteS State iterator to state in external stage.
-     * \param curPrefix The prefix of the current external process in memory.
-     * \param pExt Pointer to the current external process.
-     * \param idxW Index of the weight used.
-     * \param idxD Index of duration.
-     * \param g Current average reward.
-     * \param discountF The discount factor for one time unit.
-     *
-     * \return True if a new policy of the external process is found.
+    /**
+     * @brief Update external process states corresponding to the first stage in the external process.
+     * @param op Bellman operator.
+     * @param sense Optimization sense.
+     * @param iteS State iterator to state in external stage.
+     * @param curPrefix The prefix of the current external process in memory.
+     * @param pExt Pointer to the current external process.
+     * @param idxW Index of the weight used.
+     * @param idxD Index of duration.
+     * @param g Current average weight.
+     * @param discountF The discount factor for one time unit.
+     * @return True if a new policy of the external process is found.
      */
-    bool ExternalStatesUpdate(Crit crit, state_iterator iteS, string & curPrefix, HMDPPtr & pExt,
+    bool ExternalStatesUpdate(BellmanOp op, OptSense sense, state_iterator iteS, string & curPrefix, HMDPPtr & pExt,
         const idx & idxW, const idx & idxD, const flt & g, const flt & discountF);
 
 
-    /** Copy values between the HMDP and the external process.
-     * \param stage Stage string of the HMDP.
-     * \param stageExt Stage string of the external HMDP.
-     * \param pExt Pointer to the current external process.
-     * \param toExt True if move values to the external process (false if move from).
+    /**
+     * @brief Copy values between the HMDP and the external process.
+     * @param stage Stage string of the HMDP.
+     * @param stageExt Stage string of the external HMDP.
+     * @param pExt Pointer to the current external process.
+     * @param toExt True if move values to the external process (false if move from).
      */
     void ExternalCopyWState(string stage, string stageExt, const HMDPPtr & pExt, const bool toExt);
 
 
-    /** Return true if the state is a external process state corresponding to the first stage in a external process.
-     * \param ite State iterator to state.
+    /**
+     * @brief Return true if the state is an external process state corresponding to the first stage in an external process.
+     * @param ite State iterator to state.
+     * @return True if external.
      */
     bool ExternalState(state_iterator ite) {
         if (externalProc) {
@@ -410,20 +581,22 @@ class HMDP
     }
 
 
-    /** Allocate memory for the external process (check if not already allocated).
-     * \param prefix Prefix of the external process.
-     * \param curPrefix The prefix of the current external process in memory.
-     * \param pExt Pointer to the current external process.
+    /**
+     * @brief Allocate memory for the external process (check if not already allocated).
+     * @param pExt Pointer to the current external process.
+     * @param prefix Prefix of the external process.
+     * @param curPrefix The prefix of the current external process in memory.
      */
     void ExternalAllocteMem(HMDPPtr & pExt, const string & prefix, string & curPrefix);
 
 
-    /** Set the values of the external actions to the reward, duration and trans pr of the external process
-     * \param stageStr Stage string of states corresponding to the first stage in the external process
-     * \param pExt Pointer to the current external process.
-     * \param idxW Index of the weight used.
-     * \param idxD Index of duration.
-     * \return True if the values have changed (indicate that the policy has changed).
+    /**
+     * @brief Set the values of the external actions to the weight, duration and transition probability of the external process.
+     * @param stageStr Stage string of states corresponding to the first stage in the external process.
+     * @param pExt Pointer to the current external process.
+     * @param idxW Index of the weight used.
+     * @param idxD Index of duration.
+     * @return True if the values have changed (indicate that the policy has changed).
      */
     bool ExternalSetActions(string stageStr, const HMDPPtr & pExt, const idx & idxW, const idx & idxD);
 
@@ -472,13 +645,30 @@ class HMDP
 
 // Set functions ---------------------
 
-    /** Set number of weights stored in actions (and their names). */
+    /**
+     * @brief Set number of weights stored in actions (and their names).
+     * @param names The names.
+     */
     void SetActionWeightNames(const vector<string> & names) {
+        weightActionNames = names;
         weightNames = names;
     }
 
+    /**
+     * @brief Set number of weights stored in transitions (and their names).
+     * @param names The names.
+     */
+    void SetTransWeightNames(const vector<string> & names) {
+        weightTransNames = names;
+        weightNames = weightActionNames;
+        weightNames.insert(weightNames.end(), weightTransNames.begin(), weightTransNames.end());
+    }
 
-    /** Set the action id of the predecessor action. */
+
+    /**
+     * @brief Set the action id of the predecessor action.
+     * @param id The id.
+     */
     void SetPred(int id) {
         for (idx i=0; i<states.size(); ++i) {
             if (states[i].actions.size()>0) states[i].pred = id;
@@ -486,7 +676,8 @@ class HMDP
         }
     }
 
-    /** Set the weights of all states.
+    /**
+     * @brief Set the weights of all states.
      * @param val Value.
      */
     void SetAllStateW(flt & val) {
@@ -494,7 +685,9 @@ class HMDP
     }
 
 
-    /** Set the weights of all states.
+    /**
+     * @brief Set the weights of specified states.
+     * @param iS Indices of states.
      * @param val Value.
      */
     void SetStateW(vector<idx> & iS, flt val) {
@@ -502,7 +695,8 @@ class HMDP
     }
 
 
-    /** Set the weights of all states in a stage.
+    /**
+     * @brief Set the weights of all states in a stage.
      * @param stageStr Stage string.
      * @param val Value.
      */
@@ -512,54 +706,74 @@ class HMDP
         for (idx i=0; i<pS.second; ++i, ++iS) states[iS].w = val;
     }
 
+    /**
+     * @brief Set terminal state weights on the last founder stage.
+     * @param values Terminal weights.
+     * @throw runtime_error If the vector length does not match the last-stage size.
+     */
+    void SetTerminalW(vector<flt> values) {
+        string stageLastStr = GetLastStageStr();
+        if (values.size()!=GetStateSize(stageLastStr)) throw runtime_error("Terminal values vector length does not match the last-stage state count.");
+        vector<flt>::iterator iteV;
+        state_iterator iteS;
+        for (iteS = state_begin(stageLastStr), iteV=values.begin(); iteS!=state_end(stageLastStr); ++iteS, ++iteV) {
+            w(iteS) = *iteV;
+        }
+    }
 
-    /** Set the action weight.
-     * \param w The weight to set.
-     * \param iS The index of the state we consider in \code states.
-     * \param iA The index of the action we consider.
-     * \param iW The weight index.
+
+    /**
+     * @brief Set the action weight.
+     * @param w The weight to set.
+     * @param iS The index of the state.
+     * @param iA The index of the action.
+     * @param iW The weight index.
      */
     void SetActionW(const flt & w, const idx & iS, const idx & iA, const idx & iW) {
+        CheckActionWIdx(iW);
         states[iS].actions[iA].w[iW] = w;
     }
 
 
-    /** Set all the transition pr to zero of an action.
-     * \param iS Id of the state.
-     * \param iA Id of the action.
+    /**
+     * @brief Set all the transition probabilities to zero for an action.
+     * @param iS Id of the state.
+     * @param iA Id of the action.
      */
     void SetActionPrZero(const idx & iS, const idx & iA) {
         states[iS].actions[iA].SetAllTransPr(0);
     }
 
 
-    /** Set the values in \code r to the weights of the stage.
-     * \pre Matrix \code r must have dim (|S|,1) where |S| denote the number
-     * of states at the founder level.
-     * \param r The matrix.
-     * \param stageStr The stage under consideration.
+    /**
+     * @brief Set the values in vector r to the weights of the stage.
+     * @note Vector r must have length |S| where |S| is the number of states.
+     * @param r The vector.
+     * @param stageStr The stage string.
      */
-    void SetMatrixVal(MatSimple<double> &r, string stageStr) {
+    void SetMatrixVal(arma::vec &r, string stageStr) {
         idx i;
         state_iterator iteS;
         for (iteS = state_begin(stageStr), i=0; iteS!=state_end(stageStr); ++iteS, ++i) {
-            r(i,0) = w(iteS);
+            r(i) = w(iteS);
         }
     }
 
 
-    /** Set the value of the transition pr.
-     * \param pr The transition pr.
-     * \param iS Id of the state.
-     * \param iA Id of the action.
-     * \param iSTail Id the the tail state.
-     * \return The old transition pr.
+    /**
+     * @brief Set the value of a transition probability.
+     * @param pr The transition probability.
+     * @param iS Id of the state.
+     * @param iA Id of the action.
+     * @param iSTail Id of the tail state.
+     * @return The old transition probability.
      */
     flt SetGetActionPr(const flt & pr, const idx & iS, const idx & iA, const idx & iSTail);
 
-    /** Set the action of the policy.
-     * \param iS The id of the state we consider in \code states.
-     * \param iA The action index.
+    /**
+     * @brief Set the action of the policy.
+     * @param iS Vector of state indices.
+     * @param iA Vector of action indices.
      */
     void SetPolicy(vector<idx> iS, vector<idx> iA) {
         for (idx i=0; i<iS.size(); ++i)
@@ -568,70 +782,19 @@ class HMDP
 
 // Print functions -------------------
 
-    /** Print the HMDP, i.e. its states and actions. */
+    /**
+     * @brief Print the HMDP (states and actions).
+     * @return String representation.
+     */
     string Print();
 
 
-//
-//
-//    /** Print the number of states at next level of the father, current and child. */
-//    void PrintCount();
-
-
-//    /** Get all information about an action.
-//     * \param iS The index of the state we consider in \code states.
-//     * \param iA The index of the action we consider.
-//     */
-//    string GetActionInfo(idx iS, idx iA) {
-//        string str;
-//        int idxHArc = FindAction(iS,iA);
-//        if (idxHArc==0) return str;
-//        vector<idx> tails = H.GetHArcTailIdx(idxHArc);
-//        for (idx i=0; i<tails.size(); ++i) tails[i] = tails[i]-1;   // so that id start from zero
-//        vector<flt> w = H.GetHArcWeights(idxHArc);
-//        vector<flt> pr = H.GetHArcM(idxHArc,idxMult);
-//        string label = H.GetHArcLabel(idxHArc);
-//        str = "trans=" + vec2String<idx>(tails) + " pr=" + vec2String<flt>(pr) + " w=" + vec2String<flt>(w) + " (" + label + ")";
-//        return str;
-//    }
-//
-//
-//    /** Get all information about an action.
-//     * \param iS The index of the state we consider in \code states.
-//     * \param iA The index of the action we consider.
-//     */
-//    vector<flt> GetActionTransPr(idx iS, idx iA) {
-//        vector<flt> v;
-//        int idxHArc = FindAction(iS,iA);
-//        if (idxHArc==0) return v;
-//        vector<flt> pr = H.GetHArcM(idxHArc,idxMult);
-//        return pr;
-//    }
-//
-//
-//    /** Get the state-expanded hypergraph in matrix format. */
-//    MatSimple<int> HgfMatrix() {
-//        return H.HgfMatrix();
-//    }
-//
-//    /** Get the transition probability matrix P given a policy for the founder. */
-//    MatSimple<flt> GetTransPr() {
-//        int rows = stages.count("0");
-//        pair< multimap<string, int >::iterator, multimap<string, int >::iterator > pairZero;
-//        pair< multimap<string, int >::iterator, multimap<string, int >::iterator > pairLast;
-//        MatSimple<flt> P(rows,rows);    // Matrix of prob values
-//        pairZero = stages.equal_range("0");
-//        pairLast = stages.equal_range("1");
-//        FounderPr(P,pairZero,pairLast);
-//        return P;
-//    }
-
-
-
-
-    /** Calculate the steady state probabilities for the founder chain (infinite time-horizon, ergodic chain).
-     * \return A vector with the probabilities
-     * \post Use \code GetLog to see the log.
+    /**
+     * @brief Calculate the steady state probabilities for the founder chain.
+     * 
+     * Assumes infinite time-horizon and ergodic chain.
+     *
+     * @return A vector with the probabilities.
      */
     vector<flt> CalcSteadyStatePr();
 
@@ -840,34 +1003,41 @@ class HMDP
 
 
 
-    /** Calculate the weights of the founder states given a specific policy.
-     * \param crit Criterion used.
-     * \param w Column matrix storing the calculated weights.
-     * \param idxW W  The index we consider.
-     * \param pairZero Iterator pair pointing to stage zero at founder level.
-     * \param pairOne Iterator pair pointing to stage one at founder level.
-     * \note Modify the weights stored in the states of the HMDP.
+    /**
+     * @brief Calculate the weights of the founder states given a specific policy.
+     * @note Modifies the weights stored in the states of the HMDP.
+     * @param op Bellman operator.
+     * @param w Column matrix storing the calculated weights.
+     * @param idxW The weight index.
+     * @param g The average weight.
+     * @param idxD The duration index.
+     * @param discountF The discount factor.
      */
-    void FounderW(Crit crit, MatSimple<double> &w, const idx &idxW, flt g = 0, idx idxD = 0, flt discountF = 1)
+    void FounderW(BellmanOp op, arma::vec &w, const idx &idxW, flt g = 0, idx idxD = 0, flt discountF = 1)
     {
         //cout << "FounderW: idxW=" << idxW << " idxD=" << idxD << endl;
         SetStateWStage("1",0);
-        CalcPolicy(crit, idxW, g , idxD, discountF);
+        CalcPolicy(op, idxW, g , idxD, discountF);
         SetMatrixVal(w,"0");
     }
 
 
-    /** Calculate the transition probabilities of the founder states given a specific policy.
-     * \note Modify the state weights.
+    /**
+     * @brief Calculate the transition probabilities of the founder states given a specific policy.
+     * @note Modifies the state weights.
+     * @param op Bellman operator.
+     * @param P The transition probability matrix.
+     * @param idxD The duration index.
+     * @param discountF The discount factor.
      */
-    void FounderPr(Crit crit, MatSimple<double> &P, idx idxD = 0, flt discountF = 1) {
+    void FounderPr(BellmanOp op, arma::mat &P, idx idxD = 0, flt discountF = 1) {
         idx r,c;
         state_iterator iteS, iteZero;
         SetStateWStage("1", 0);
         for (iteS = state_begin("1"), c=0; iteS!=state_end("1"); ++iteS, ++c) {
             w(iteS) = 1;
             if (c>0) w(iteS-1) = 0; // restore previous
-            CalcPolicy(crit,0,0,idxD,discountF);
+            CalcPolicy(op,0,0,idxD,discountF);
             for (iteZero=state_begin("0"), r=0; iteZero!=state_end("0"); ++iteZero, ++r) { //cout << "WiteZ=" << w(iteZero) << " r=" << r << " c=" << c << endl;
                 P(r,c) = w(iteZero);
             }
@@ -884,6 +1054,11 @@ class HMDP
 // ----------------------------------------------------------------------------
 // Get methods -------------------
 
+    /**
+     * @brief Get stage string of state index vector.
+     * @param iState State index vector.
+     * @return The stage string.
+     */
     string GetStageStr(vector<idx> & iState) {
         string str;
         idx size = iState.size();
@@ -895,13 +1070,22 @@ class HMDP
     }
 
 
+    /**
+     * @brief Get stage string of state string.
+     * @param stateStr The state string.
+     * @return The stage string.
+     */
     string GetStageStr(string stateStr) {
         idx pos = stateStr.find_last_of(",");
         return stateStr.substr(0,pos);
     }
 
 
-    /** State string of state index vector. */
+    /**
+     * @brief Get state string of state index vector.
+     * @param iState State index vector.
+     * @return The state string.
+     */
     string GetStateStr(vector<idx> & iState) {
         string str;
         idx size = iState.size();
@@ -913,9 +1097,11 @@ class HMDP
     }
 
 
-    /** State string of state id.
-     * \note Must search the stages map to find the stage.
-    */
+    /**
+     * @brief Get state string of state id.
+     * @param sId State id.
+     * @return The state string.
+     */
     string GetStateStr(idx sId) {
         string stateStr;
         for (stage_iterator iteN = stage_begin(); iteN!=stage_end(); ++iteN) {
@@ -928,7 +1114,11 @@ class HMDP
         return stateStr;
     }
 
-    /** State strings of state ids. */
+    /**
+     * @brief Get state strings of state ids.
+     * @param sId Vector of state ids.
+     * @return Vector of state strings.
+     */
     vector<string> GetStatesStr(vector<idx> & sId) {
         vector<string> v;
         for(idx i=0; i<sId.size(); i++) {
@@ -938,6 +1128,11 @@ class HMDP
     }
 
 
+    /**
+     * @brief Get next stage string of state index vector.
+     * @param iState State index vector.
+     * @return The next stage string.
+     */
     string GetNextStageStr(vector<idx> & iState) {
         string str;
         idx size = iState.size();
@@ -949,8 +1144,10 @@ class HMDP
     }
 
 
-    /** Return the string of the next stage at the current level (do not check if exists).
-     * \param curStageStr The string of the current stage (e.g. 'n0,s0,a0,n1').
+    /**
+     * @brief Return the string of the next stage at the current level.
+     * @param curStageStr The string of the current stage.
+     * @return The next stage string.
      */
     string GetNextStageStr(string curStageStr) {
         uSInt found = curStageStr.find_last_of(",");
@@ -959,6 +1156,11 @@ class HMDP
     }
 
 
+    /**
+     * @brief Get next father stage string of state index vector.
+     * @param iState State index vector.
+     * @return The next father stage string.
+     */
     string GetNextFatherStageStr(vector<idx> & iState) {
         string str;
         idx size = iState.size();
@@ -971,6 +1173,12 @@ class HMDP
     }
 
 
+    /**
+     * @brief Get next child stage string of state index vector and action index.
+     * @param iState State index vector.
+     * @param iAction Action index.
+     * @return The next child stage string.
+     */
     string GetNextChildStageStr(vector<idx> & iState, idx & iAction) {
         string str = GetStateStr(iState);
         str.append(","+ToString(iAction)+",0");
@@ -978,23 +1186,38 @@ class HMDP
     }
 
 
+    /**
+     * @brief Get the last stage string.
+     * @return The last stage string.
+     */
     string GetLastStageStr() {
         if (timeHorizon>=INFINT) return "1";
         else return ToString(timeHorizon-1);
     }
 
 
-    /** Return which level the state is on (starting from zero). */
+    /**
+     * @brief Return which level the state is on.
+     * @param iState State index vector.
+     * @return The level (starting from zero).
+     */
     int GetLevel(vector<idx> & iState) {
         return (iState.size()-2)/3;
     }
 
 
-    /** Get the content of the log as a string. */
+    /**
+     * @brief Get the content of the log.
+     * @return The log string.
+     */
     string GetLog() {return log.str();}
 
 
-    /** Get id of state. */
+    /**
+     * @brief Get id of state.
+     * @param stateStr State string.
+     * @return The state id.
+     */
     idx GetId(string stateStr) {
         string stageStr = GetStageStr(stateStr);
         idx pos = stateStr.find_last_of(",");
@@ -1007,7 +1230,11 @@ class HMDP
     }
 
 
-    /** Get id of state(s) as a vector. */
+    /**
+     * @brief Get id of states in a stage.
+     * @param stageStr Stage string.
+     * @return Vector of state ids.
+     */
     vector<idx> GetIds(string stageStr) {
         vector<idx> v;
         pair<idx,idx> sP = stages[stageStr];
@@ -1019,8 +1246,10 @@ class HMDP
     }
 
 
-    /** Return the labels of the actions of current policy.
-     * \param iS Vector of state indices.
+    /**
+     * @brief Return the labels of the states.
+     * @param iS Vector of state indices.
+     * @return Vector of labels.
      */
     vector<string> GetStateLabel(vector<idx> iS) {
         vector<string> val;
@@ -1032,8 +1261,10 @@ class HMDP
     }
 
 
-    /** Return the state weights of a given stage.
-     * \param stageStr Stage string.
+    /**
+     * @brief Return the state weights of a given stage.
+     * @param stageStr Stage string.
+     * @return Vector of weights.
      */
     vector<flt> GetStageW(string stageStr) {
         vector<flt> v;
@@ -1046,16 +1277,30 @@ class HMDP
     }
 
 
-    /** Number of actions. */
+    /**
+     * @brief Number of actions for a state.
+     * @param ite State iterator.
+     * @return Number of actions.
+     */
     idx GetActionSize(state_iterator ite) {return ite->actions.size();}
 
-    /** Number of states. */
+    /**
+     * @brief Number of states in a stage.
+     * @param stageStr Stage string.
+     * @return Number of states.
+     */
     idx GetStateSize(string stageStr) {return stages[stageStr].second;}
 
-    /** Number of states. */
+    /**
+     * @brief Total number of states.
+     * @return Total number of states.
+     */
     idx GetStateSize() {return states.size();}
 
-    /** Number of actions. */
+    /**
+     * @brief Total number of actions.
+     * @return Total number of actions.
+     */
     idx GetActionSize() {
         idx size = 0;
         for (state_iterator iteS = state_begin(); iteS!=state_end(); iteS++)
@@ -1063,13 +1308,35 @@ class HMDP
         return size;
     }
 
-    /** Action weight name. */
-    string GetWName(idx iW) {return weightNames[iW];}
+    /**
+     * @brief Get action weight name.
+     * @param iW Weight index.
+     * @return The weight name.
+     */
+    string GetWName(idx iW) {
+        if (IsActionWIdx(iW)) return weightActionNames[iW];
+        if (IsTransWIdx(iW)) return weightTransNames[TransWIdx(iW)];
+        throw runtime_error("Global weight index out of range.");
+    }
 
-    /** Id of state */
+    /** @brief Get all action weight names. */
+    vector<string> GetActionWNames() {return weightActionNames;}
+
+    /** @brief Get all transition weight names. */
+    vector<string> GetTransWNames() {return weightTransNames;}
+
+    /**
+     * @brief Id of state.
+     * @param iteS State iterator.
+     * @return State id.
+     */
     idx GetId(state_iterator iteS) {return iteS - states.begin();}
 
-    /** Iterator of a state. */
+    /**
+     * @brief Iterator of a state.
+     * @param iS State index.
+     * @return State iterator.
+     */
     state_iterator GetIte(idx iS) {return states.begin() + iS;}
 
     /** Iterator of an action. */
@@ -1079,8 +1346,10 @@ class HMDP
     idx GetIdx(state_iterator iteS, action_iterator iteA) {return iteA - iteS->actions.begin();}
 
 
-    /** Return the weight.
-     * \param iS Vector of state indices.
+    /**
+     * @brief Return the state weight.
+     * @param iS Vector of state indices.
+     * @return Vector of weights.
      */
     vector<flt> GetPolicyW(vector<idx> iS) {
         vector<flt> val;
@@ -1091,8 +1360,10 @@ class HMDP
         return val;
     }
 
-    /** Return the weight.
-     * \param stageStr Stage string.
+    /**
+     * @brief Return the state weight for a stage.
+     * @param stageStr Stage string.
+     * @return Vector of weights.
      */
     vector<flt> GetPolicyWStage(string stageStr) {
         vector<idx> iS = GetIds(stageStr);
@@ -1100,8 +1371,10 @@ class HMDP
     }
 
 
-    /** Return the index of the actions of current policy.
-     * \param iS Vector of state indices.
+    /**
+     * @brief Return the index of the actions of current policy.
+     * @param iS Vector of state indices.
+     * @return Vector of action indices.
      */
     vector<int> GetPolicy(vector<idx> iS) {
         vector<int> val;
@@ -1113,8 +1386,10 @@ class HMDP
     }
 
 
-    /** Return the index of the actions of current policy.
-     * \param iS Vector of state indices.
+    /**
+     * @brief Return the index of the actions of current policy in a stage.
+     * @param stageStr Stage string.
+     * @return Vector of action indices.
      */
     vector<int> GetPolicyStage(string stageStr) {
         vector<idx> iS = GetIds(stageStr);
@@ -1122,8 +1397,10 @@ class HMDP
     }
 
 
-    /** Return the labels of the actions of current policy.
-     * \param iS Vector of state indices.
+    /**
+     * @brief Return the labels of the actions of current policy.
+     * @param iS Vector of state indices.
+     * @return Vector of action labels.
      */
     vector<string> GetPolicyLabel(vector<idx> iS) {
         vector<string> val;
@@ -1138,7 +1415,9 @@ class HMDP
         return val;
     }
 
-    /** Return the external processes info in the format (stageStr, external proc prefix, ...)
+    /**
+     * @brief Return the external processes info.
+     * @return Vector of strings in format (stageStr, external proc prefix, ...).
      */
     vector<string> GetExternalInfo() {
         vector<string> val;
@@ -1153,132 +1432,142 @@ class HMDP
 
 // Accessors (get/set functions for the algorithms, return by reference)
 
+    /** @brief Reference to state weight. */
     flt & w(state_iterator iteS) {return iteS->w;}
-    flt & w(action_iterator iteA, idx iW) {return iteA->w[iW];}
-    flt & w(state_iterator iteS, idx iA, idx iW) {return iteS->actions[iA].w[iW];}
+
+    /** @brief Reference to action weight. */
+    flt & w(action_iterator iteA, idx iW) {CheckActionWIdx(iW); return iteA->w[iW];}
+
+    /** @brief Reference to action weight for a state. */
+    flt & w(state_iterator iteS, idx iA, idx iW) {CheckActionWIdx(iW); return iteS->actions[iA].w[iW];}
+
+    /** @brief Reference to transition-level weight. */
+    flt & transW(trans_iterator iteT, idx iW) {CheckTransWIdx(iW); return iteT->w[iW];}
+
+    /** @brief Reference to transition probability. */
     flt & pr(trans_iterator iteT) {return iteT->pr;}
+
+    /** @brief Reference to predecessor action index. */
     int & pred(state_iterator iteS) {return iteS->pred;}
+
+    /** @brief Reference to state label. */
     string & label(state_iterator iteS) {return iteS->label;}
 
 
 
 
 
-    /** Reset log. */
+    /** @brief Reset log. */
     void ResetLog() {log.str("");}
 
 
 // Algorithms -----------------------------------------------------------------
 
-    /** Calculates the optimal policy of a single stage of the founder (a hypertree).
-     * \pre Moreover, weights in states with no actions must have been set.
-     * \post The policy is defined in pred and weights w[iSW] are calculated in each node.
-     * \param crit Criterion used (enum type must be AverageReward, Reward, DiscountedReward, TransPr).
-     * \param idxW The action weight index we want to optimize.
-     * \param g The average reward (only used in criterion is AverageReward).
-     * \param idxDur The action duration index.
-     * \param discountF The discount factor for one time unit.
+    /**
+     * @brief Calculates the optimal policy of a single stage of the founder (a hypertree).
      *
-     * \note The last three parameters is only used if criterion is DiscountedReward.
-     * If we are minimizing the weights, i.e. if the goal is to minimize
-     * the cost then the rewards at idxW must be multiplied with -1.
-     * \return True if a new policy is found. Remember to reset the predecessors if no old policy before
-     * running this method!
-     */
-    bool CalcOptPolicy(Crit crit, idx idxW = 0, flt g = 0, idx idxDur = 0, flt discountF = 1);
-
-
-    /** Calculates weights based on the current policy of a single stage of the founder.
-     * \pre Moreover, weights in states with no actions must have been set.
-     * \post The policy is defined in pred and weights w[iSW] are calculated in each node.
-     * \param crit Criterion used (enum type must be AverageReward, Reward, DiscountedReward, TransPr).
-     * \param idxW The action weight index we want to optimize.
-     * \param g The average reward (only used in criterion is AverageReward).
-     * \param idxDur The action duration index.
-     * \param discountF The discount factor for one time unit.
+     * The policy is defined in pred and weights w are calculated in each node.
+     * Weights in states with no actions must have been set.
      *
-     * \note The last two parameters is only used if criterion is DiscountedReward.
-     * If we are minimizing the weights, i.e. if the goal is to minimize
-     * the cost then the rewards at idxW must be multiplied with -1.
+     * @param op Bellman operator.
+     * @param sense Optimization direction used for policy improvement.
+     * @param idxW The action weight index we want to optimize.
+     * @param g The average weight (only used when op is BellmanOp::Average).
+     * @param idxDur The action duration index.
+     * @param discountF The discount factor for one time unit.
+     * @return True if a new policy is found.
      */
-    void CalcPolicy(Crit crit, idx idxW = 0, flt g = 0, idx idxDur = 0, flt discountF = 1);
+    bool CalcOptPolicy(BellmanOp op, OptSense sense, idx idxW = 0, flt g = 0, idx idxDur = 0, flt discountF = 1);
 
-
-
-    /** Calculate rentention payoff (RPO) for a state. Normally run
-     * after an optimal policy has been found.
-     * \param iS The id of the state we consider in \code states.
-     * \param idxW The index of weights to calculate.
-     * \param idxA The action index we calculate the RPO with respect to (same size as iS).
-     * \param g The average reward (only used in criterion is AverageReward).
-     * \param idxDur The action duration index.
-     * \param discountF The discount factor for one time unit.
+    /** Calculates the optimal policy using a specialized Bellman operator.
      *
-     * \return A vector of the same size as the states containing the RPO values.
-     */
-    vector<flt> CalcRPO(Crit crit, vector<idx> & iS, idx idxW, vector<idx> & idxA, flt g = 0, idx idxDur = 0, flt discountF = 1) {
-        flt wA;      // weight the idxA
-        flt wMax;    // max weight of the prececessor not equal idxA
-        flt wTmp;    // weight to compare
-        flt dB = discountF;      // the discount base   //  cout<< "r:" << rate << " b:" << rateBase << endl;
-        vector<flt> result;
-
-        for(idx i=0; i<iS.size(); ++i) {
-            wMax = wA = -INF;
-            state_iterator iteS = GetIte(iS[i]);
-            action_iterator iteAA = GetIte(iteS, idxA[i]);
-            if ( (GetActionSize(iteS)==0) || (GetActionSize(iteS)==1) ) {
-                result.push_back(-INF);
-                continue;
-            }
-            for (action_iterator iteA = action_begin(iteS); iteA!=action_end(iteS); ++iteA) { //cout << "    iA: " << GetIdx(iteS,iteA) << " w=" << vec2String(iteA->w) << " ";
-                wTmp=0;
-                bool isMinInf = false;
-                for (trans_iterator iteT = trans_begin(iteA); iteT!=trans_end(iteA); ++iteT) { //cout << "      t: w(" << iteT->id << ")=" << w(GetIte(iteT->id)) << endl;
-                    if ( w(GetIte(iteT->id) ) <= -INF) {
-                        wTmp= -INF;
-                        isMinInf = true;
-                        break;
-                    }
-                    wTmp += w( GetIte(iteT->id) ) * pr(iteT);
-                }
-                if (isMinInf) continue;
-                switch(crit){
-                    case AverageReward: wTmp += w(iteA,idxW)-w(iteA,idxDur)*g; break;
-                    case Reward: wTmp += w(iteA,idxW); break;
-                    case DiscountedReward: wTmp = wTmp*pow(dB,w(iteA,idxDur)) + w(iteA,idxW); break;
-                    //case TransPr: wTmp = wTmp; break;  // generates warning: explicitly assigning value of variable of type 'flt' (aka 'double') to itself
-                    case TransPr: break;
-                    case TransPrDiscounted: wTmp = wTmp*pow(dB,w(iteA,idxDur)); break;
-                    default: log << "Criterion not defined!" << endl; break;
-                }
-                if (iteA==iteAA) {
-                    wA = wTmp;
-                    continue;
-                }
-                wMax = max(wMax,wTmp);
-            }
-            result.push_back(wA - wMax);
-        }
-        return result;
-    }
-
-
-    /** Policy iteration algorithm (infinite time-horizon).
-     * \param crit Criterion used (enum type).
-     * \param maxIte The max number of iterations. The model may loop if not unichain.
-     * \param idxW Index of the weight used as nominator.
-     * \param idxD The denominator we want to maximize the weight over.
-     * \param discountF The discount factor for one time unit.
+     * This entry point dispatches once on \p op and \p level, then calls a
+     * specialized implementation with tight transition loops. No operator or
+     * weight-level checks are performed inside the transition loops.
      *
-     * \return g The gain.
-     * \post Use \code GetLog to see the optimization log.
+     * \param op Bellman operator to apply.
+     * \param level Whether \p idxW refers to action-level or transition-level weights.
+     * \param idxW Local weight index at the selected \p level.
+     * \param g Average weight, used by average expected-weight operators.
+     * \param idxDur Action-level duration index used by discounted and average operators.
+     * \param discountF Discount factor for one time unit.
+     *
+     * \return True if a new policy is found.
+     *
+     * \throw runtime_error If the operator/level combination is not implemented
+     * or requested weight values are missing.
      */
-    flt PolicyIte(Crit crit, uSInt maxIte, const idx idxW, const idx idxD, const flt discountF = 1);
+    bool CalcOptPolicy(BellmanOp op, OptSense sense, WeightLevel level, idx idxW = 0, flt g = 0, idx idxDur = 0, flt discountF = 1);
+
+
+    /**
+     * @brief Calculates state weights based on the current policy of a single stage of the founder.
+     *
+     * The policy is defined in pred and weights w are calculated in each node.
+     * Weights in states with no actions must have been set.
+     *
+     * @param op Bellman operator.
+     * @param idxW The action weight index we want to optimize.
+     * @param g The average weight (only used when op is BellmanOp::Average).
+     * @param idxDur The action duration index.
+     * @param discountF The discount factor for one time unit.
+     */
+    void CalcPolicy(BellmanOp op, idx idxW = 0, flt g = 0, idx idxDur = 0, flt discountF = 1);
+
+    /** Calculates state weights under the current policy using a specialized Bellman operator.
+     *
+     * The method mirrors \code CalcOptPolicy(BellmanOp, WeightLevel, ...), but
+     * evaluates the already stored policy in \code pred rather than optimizing
+     * over all actions.
+     *
+     * \param op Bellman operator to apply.
+     * \param level Whether \p idxW refers to action-level or transition-level weights.
+     * \param idxW Local weight index at the selected \p level.
+     * \param g Average weight, used by average expected-weight operators.
+     * \param idxDur Action-level duration index used by discounted and average operators.
+     * \param discountF Discount factor for one time unit.
+     *
+     * \throw runtime_error If the operator/level combination is not implemented
+     * or requested weight values are missing.
+     */
+    void CalcPolicy(BellmanOp op, WeightLevel level, idx idxW = 0, flt g = 0, idx idxDur = 0, flt discountF = 1);
+
+
+
+    /**
+     * @brief Calculate retention payoff (RPO) for a state.
+     * 
+     * Normally run after an optimal policy has been found.
+     *
+     * @param op Bellman operator.
+     * @param sense Optimization direction.
+     * @param iS The id of the state we consider in states.
+     * @param idxW The index of weights to calculate.
+     * @param idxA The action index we calculate the RPO with respect to (same size as iS).
+     * @param g The average weight (only used when op is BellmanOp::Average).
+     * @param idxDur The action duration index.
+     * @param discountF The discount factor for one time unit.
+     * @return A vector of the same size as the states containing the RPO values.
+     */
+    vector<flt> CalcRPO(BellmanOp op, OptSense sense, vector<idx> & iS, idx idxW, vector<idx> & idxA, flt g = 0, idx idxDur = 0, flt discountF = 1);
+
+
+    /**
+     * @brief Policy iteration algorithm (infinite time-horizon).
+     *
+     * @param op Bellman operator.
+     * @param sense Optimization direction.
+     * @param maxIte The max number of iterations. The model may loop if not unichain.
+     * @param idxW Index of the weight used as nominator.
+     * @param idxD The denominator we want to optimize the weight over.
+     * @param discountF The discount factor for one time unit.
+     * @return The gain g.
+     */
+    flt PolicyIte(BellmanOp op, OptSense sense, uSInt maxIte, const idx idxW, const idx idxD, const flt discountF = 1);
 
 
     /** Policy iteration algorithm (infinite time-horizon) given a fixed policy.
-     * \param crit Criterion used (enum type).
+     * \param op Bellman operator.
      * \param maxIte The max number of iterations. The model may loop if not unichain.
      * \param idxW Index of the weight used as nominator.
      * \param idxD The denominator we want to maximize the weight over.
@@ -1287,11 +1576,11 @@ class HMDP
      * \return g The gain.
      * \post Use \code GetLog to see the optimization log.
      */
-    flt PolicyIteFixedPolicy(Crit crit, const idx idxW, const idx idxD, const flt discountF = 1);
+    flt PolicyIteFixedPolicy(BellmanOp op, const idx idxW, const idx idxD, const flt discountF = 1);
 
      /** Value iteration algorithm.
      *
-     * \param crit Criterion used (enum type).
+     * \param op Bellman operator.
      * \param maxIte The max number of iterations.
      * \param epsilon If max(w(t)-w(t+1))<epsilon then stop the algorithm, i.e
      *        the policy becomes epsilon optimal (see Puterman p161).
@@ -1303,7 +1592,7 @@ class HMDP
      *
      * \post Use \code GetLog to see the optimization log.
      */
-    void ValueIte(Crit crit, idx maxIte, flt epsilon, const idx idxW,
+    void ValueIte(BellmanOp op, OptSense sense, idx maxIte, flt epsilon, const idx idxW,
      const idx idxDur, vector<flt> & termValues,
      const flt g, const flt discountF);
 
@@ -1327,7 +1616,9 @@ class HMDP
 public:
     int levels;                     ///< Number of levels in the HMDP, i.e. the levels are 0, ..., levels-1.
     uInt timeHorizon;               ///< INFINT if consider an infinite time horizon; otherwise the number of stages at the founder level.
-    vector<string> weightNames;     ///< Names of the weights/quantities stored from index 1 in \code w (of a (hyper)arc in the hypergraph).
+    vector<string> weightNames;     ///< Backward compatible concatenation of action and transition weight names.
+    vector<string> weightActionNames; ///< Names of action-level weights r(s,a).
+    vector<string> weightTransNames;  ///< Names of transition-level weights r(s,a,s').
     map< string, pair<idx,idx> > stages;   ///< Ordered map of stages. The pair contains (state id to first stage in stages, total number of states at stage).
     vector<HMDPState> states;
     map<string, string> external;     ///< Store the external processes in format <stageIdx, prefix>
@@ -1337,126 +1628,602 @@ public:
     ostringstream log;              ///< Stream to store log messages.
 private:
     Timer timer;
+
+    /** Return true if \p iW is an action-level weight index. */
+    bool IsActionWIdx(idx iW) const {return iW < weightActionNames.size();}
+
+    /** Return true if \p iW is a global transition-level weight index. */
+    bool IsTransWIdx(idx iW) const {return iW >= weightActionNames.size() && iW < weightActionNames.size() + weightTransNames.size();}
+
+    /** Convert a global transition weight index to its local transition index. */
+    idx TransWIdx(idx iW) const {return iW - weightActionNames.size();}
+
+    /** Human-readable Bellman operator name for diagnostics. */
+    string BellmanOpName(BellmanOp op) const;
+
+    /** Human-readable optimization sense name for diagnostics. */
+    string OptSenseName(OptSense sense) const;
+
+    /** Throw when a global weight index is invalid or unsupported for \p op. */
+    WeightLevel ValidateGlobalWeightForOp(BellmanOp op, idx iW) const;
+
+    /** Throw if \p iW is not a valid action-level weight index. */
+    void CheckActionWIdx(idx iW) const {
+        if (iW >= weightActionNames.size()) throw runtime_error("Action weight index out of range.");
+    }
+
+    /** Throw if \p iW is not a valid transition-level weight index. */
+    void CheckTransWIdx(idx iW) const {
+        if (iW >= weightTransNames.size()) throw runtime_error("Transition weight index out of range.");
+    }
+
+    /** Infer whether a backward-compatible global weight index is action or transition level. */
+    WeightLevel WeightLevelFromGlobalIdx(idx iW) const {
+        if (IsActionWIdx(iW)) return WeightLevel::Action;
+        if (IsTransWIdx(iW)) return WeightLevel::Transition;
+        throw runtime_error("Global weight index out of range.");
+    }
+
+    /** Validate and return the local weight index for a given weight level. */
+    idx LocalWeightIdx(WeightLevel level, idx iW) const {
+        if (level==WeightLevel::Action) {
+            CheckActionWIdx(iW);
+            return iW;
+        }
+        if (!IsTransWIdx(iW)) throw runtime_error("Transition weight index out of range.");
+        return TransWIdx(iW);
+    }
+
+    /** Validate that all actions contain action weight \p idxW. */
+    void CheckActionWeightsAvailable(idx idxW) const;
+
+    /** Validate that all transitions contain transition weight \p idxW. */
+    void CheckTransitionWeightsAvailable(idx idxW) const;
+
+    /**
+     * @brief Calculate expected total action weight under the current policy.
+     * @param idxW The action weight index.
+     * @param mean Vector storing expected total weights by state.
+     */
+    void CalcPolicyActionMean(idx idxW, vector<flt> &mean);
+
+    /**
+     * @brief Calculate expected total transition weight under the current policy.
+     * @param idxW The transition weight index.
+     * @param mean Vector storing expected total weights by state.
+     */
+    void CalcPolicyTransitionMean(idx idxW, vector<flt> &mean);
+
+    /**
+     * @brief Optimize a policy under the second-moment Bellman operator.
+     * @param op Bellman operator, expected to be BellmanOp::SecondMoment.
+     * @param sense Optimization direction.
+     * @param level Weight storage level.
+     * @param idxW Local weight index.
+     * @param mean Expected total weights by state, updated for selected actions.
+     * @return True if a new policy is found.
+     */
+    bool CalcOptPolicySecondMoment(BellmanOp op, OptSense sense, WeightLevel level, idx idxW, vector<flt> &mean);
+
+    /**
+     * @brief Calculate RPO using action weights r(s,a).
+     * @param iS Vector of state indices.
+     * @param idxW The weight index.
+     * @param idxA Vector of action indices.
+     * @return Vector of RPO values.
+     */
+    vector<flt> CalcRPOActionExpectedMax(vector<idx> & iS, idx idxW, vector<idx> & idxA);
+
+    /**
+     * @brief Calculate RPO using action weights r(s,a) by minimization.
+     * @param iS Vector of state indices.
+     * @param idxW The weight index.
+     * @param idxA Vector of action indices.
+     * @return Vector of RPO values.
+     */
+    vector<flt> CalcRPOActionExpectedMin(vector<idx> & iS, idx idxW, vector<idx> & idxA);
+
+    /**
+     * @brief Calculate RPO using transition weights r(s,a,s').
+     * @param iS Vector of state indices.
+     * @param idxW The weight index.
+     * @param idxA Vector of action indices.
+     * @return Vector of RPO values.
+     */
+    vector<flt> CalcRPOTransitionExpectedMax(vector<idx> & iS, idx idxW, vector<idx> & idxA);
+
+    /**
+     * @brief Calculate RPO using transition weights r(s,a,s') by minimization.
+     * @param iS Vector of state indices.
+     * @param idxW The weight index.
+     * @param idxA Vector of action indices.
+     * @return Vector of RPO values.
+     */
+    vector<flt> CalcRPOTransitionExpectedMin(vector<idx> & iS, idx idxW, vector<idx> & idxA);
+
+    /**
+     * @brief Calculate RPO using action-level average weights.
+     * @param iS Vector of state indices.
+     * @param idxW The weight index.
+     * @param idxA Vector of action indices.
+     * @param g The average weight.
+     * @param idxDur The duration index.
+     * @return Vector of RPO values.
+     */
+    vector<flt> CalcRPOActionAverageMax(vector<idx> & iS, idx idxW, vector<idx> & idxA, flt g, idx idxDur);
+
+    /**
+     * @brief Calculate RPO using action-level average weights by minimization.
+     * @param iS Vector of state indices.
+     * @param idxW The weight index.
+     * @param idxA Vector of action indices.
+     * @param g The average weight.
+     * @param idxDur The duration index.
+     * @return Vector of RPO values.
+     */
+    vector<flt> CalcRPOActionAverageMin(vector<idx> & iS, idx idxW, vector<idx> & idxA, flt g, idx idxDur);
+
+    /**
+     * @brief Calculate RPO using action-level discounted weights.
+     * @param iS Vector of state indices.
+     * @param idxW The weight index.
+     * @param idxA Vector of action indices.
+     * @param idxDur The duration index.
+     * @param discountF The discount factor.
+     * @return Vector of RPO values.
+     */
+    vector<flt> CalcRPOActionDiscountedMax(vector<idx> & iS, idx idxW, vector<idx> & idxA, idx idxDur, flt discountF);
+
+    /**
+     * @brief Calculate RPO using action-level discounted weights by minimization.
+     * @param iS Vector of state indices.
+     * @param idxW The weight index.
+     * @param idxA Vector of action indices.
+     * @param idxDur The duration index.
+     * @param discountF The discount factor.
+     * @return Vector of RPO values.
+     */
+    vector<flt> CalcRPOActionDiscountedMin(vector<idx> & iS, idx idxW, vector<idx> & idxA, idx idxDur, flt discountF);
+
+    /**
+     * @brief Calculate RPO using transition probabilities.
+     * @param iS Vector of state indices.
+     * @param idxA Vector of action indices.
+     * @return Vector of RPO values.
+     */
+    vector<flt> CalcRPOActionTransPrMax(vector<idx> & iS, vector<idx> & idxA);
+
+    /**
+     * @brief Calculate RPO using transition probabilities by minimization.
+     * @param iS Vector of state indices.
+     * @param idxA Vector of action indices.
+     * @return Vector of RPO values.
+     */
+    vector<flt> CalcRPOActionTransPrMin(vector<idx> & iS, vector<idx> & idxA);
+
+    /**
+     * @brief Calculate RPO using discounted transition probabilities.
+     * @param iS Vector of state indices.
+     * @param idxA Vector of action indices.
+     * @param idxDur The duration index.
+     * @param discountF The discount factor.
+     * @return Vector of RPO values.
+     */
+    vector<flt> CalcRPOActionDiscountedTransPrMax(vector<idx> & iS, vector<idx> & idxA, idx idxDur, flt discountF);
+
+    /**
+     * @brief Calculate RPO using discounted transition probabilities by minimization.
+     * @param iS Vector of state indices.
+     * @param idxA Vector of action indices.
+     * @param idxDur The duration index.
+     * @param discountF The discount factor.
+     * @return Vector of RPO values.
+     */
+    vector<flt> CalcRPOActionDiscountedTransPrMin(vector<idx> & iS, vector<idx> & idxA, idx idxDur, flt discountF);
+
+    /**
+     * @brief Optimize a finite-stage policy using action weights r(s,a).
+     * 
+     * Implements V(s) = max_a { r(s,a) + sum_s' P(s'|s,a)V(s') }.
+     *
+     * @param idxW The weight index.
+     * @return True if a new policy is found.
+     */
+    bool CalcOptPolicyActionExpectedMax(idx idxW);
+
+    /**
+     * @brief Optimize a finite-stage policy using action weights r(s,a) by minimization.
+     * @param idxW The weight index.
+     * @return True if a new policy is found.
+     */
+    bool CalcOptPolicyActionExpectedMin(idx idxW);
+
+    /**
+     * @brief Optimize a finite-stage policy using transition weights r(s,a,s').
+     * 
+     * Implements V(s) = max_a { sum_s' P(s'|s,a) [r(s,a,s') + V(s')] }.
+     *
+     * @param idxW The weight index.
+     * @return True if a new policy is found.
+     */
+    bool CalcOptPolicyTransitionExpectedMax(idx idxW);
+
+    /**
+     * @brief Optimize a finite-stage policy using transition weights r(s,a,s') by minimization.
+     * @param idxW The weight index.
+     * @return True if a new policy is found.
+     */
+    bool CalcOptPolicyTransitionExpectedMin(idx idxW);
+
+    /**
+     * @brief Optimize second moment using action weights; outer action choice maximizes.
+     * @param idxW The weight index.
+     * @param mean Expected total weights by state.
+     * @return True if a new policy is found.
+     */
+    bool CalcOptPolicyActionSecondMomentMax(idx idxW, vector<flt> &mean);
+
+    /**
+     * @brief Optimize second moment using action weights; outer action choice minimizes.
+     * @param idxW The weight index.
+     * @param mean Expected total weights by state.
+     * @return True if a new policy is found.
+     */
+    bool CalcOptPolicyActionSecondMomentMin(idx idxW, vector<flt> &mean);
+
+    /**
+     * @brief Optimize second moment using transition weights; outer action choice maximizes.
+     * @param idxW The weight index.
+     * @param mean Expected total weights by state.
+     * @return True if a new policy is found.
+     */
+    bool CalcOptPolicyTransitionSecondMomentMax(idx idxW, vector<flt> &mean);
+
+    /**
+     * @brief Optimize second moment using transition weights; outer action choice minimizes.
+     * @param idxW The weight index.
+     * @param mean Expected total weights by state.
+     * @return True if a new policy is found.
+     */
+    bool CalcOptPolicyTransitionSecondMomentMin(idx idxW, vector<flt> &mean);
+
+    /**
+     * @brief Optimize a finite-stage policy using action-level average weights.
+     * 
+     * Specialized loop for the average weight criterion.
+     *
+     * @param idxW The weight index.
+     * @param g The average weight.
+     * @param idxDur The duration index.
+     * @return True if a new policy is found.
+     */
+    bool CalcOptPolicyActionAverageMax(idx idxW, flt g, idx idxDur);
+
+    /**
+     * @brief Optimize a finite-stage policy using action-level average weights by minimization.
+     * @param idxW The weight index.
+     * @param g The average weight.
+     * @param idxDur The duration index.
+     * @return True if a new policy is found.
+     */
+    bool CalcOptPolicyActionAverageMin(idx idxW, flt g, idx idxDur);
+
+    /**
+     * @brief Optimize a finite-stage policy using action-level discounted weights.
+     * 
+     * Performs discounting outside the transition loop for performance.
+     *
+     * @param idxW The weight index.
+     * @param idxDur The duration index.
+     * @param discountF The discount factor.
+     * @return True if a new policy is found.
+     */
+    bool CalcOptPolicyActionDiscountedMax(idx idxW, idx idxDur, flt discountF);
+
+    /**
+     * @brief Optimize a finite-stage policy using action-level discounted weights by minimization.
+     * @param idxW The weight index.
+     * @param idxDur The duration index.
+     * @param discountF The discount factor.
+     * @return True if a new policy is found.
+     */
+    bool CalcOptPolicyActionDiscountedMin(idx idxW, idx idxDur, flt discountF);
+
+    /**
+     * @brief Optimize a finite-stage policy using transition probabilities.
+     * @return True if a new policy is found.
+     */
+    bool CalcOptPolicyActionTransPrMax();
+
+    /**
+     * @brief Optimize a finite-stage policy using transition probabilities by minimization.
+     * @return True if a new policy is found.
+     */
+    bool CalcOptPolicyActionTransPrMin();
+
+    /**
+     * @brief Optimize a finite-stage policy using discounted transition probabilities.
+     * @param idxDur The duration index.
+     * @param discountF The discount factor.
+     * @return True if a new policy is found.
+     */
+    bool CalcOptPolicyActionDiscountedTransPrMax(idx idxDur, flt discountF);
+
+    /**
+     * @brief Optimize a finite-stage policy using discounted transition probabilities by minimization.
+     * @param idxDur The duration index.
+     * @param discountF The discount factor.
+     * @return True if a new policy is found.
+     */
+    bool CalcOptPolicyActionDiscountedTransPrMin(idx idxDur, flt discountF);
+
+    /**
+     * @brief Optimize using action weights and an inner successor minimum; outer action choice maximizes.
+     * @param idxW The weight index.
+     * @return True if a new policy is found.
+     */
+    bool CalcOptPolicyActionMinMax(idx idxW);
+
+    /**
+     * @brief Optimize using action weights and an inner successor minimum; outer action choice minimizes.
+     * @param idxW The weight index.
+     * @return True if a new policy is found.
+     */
+    bool CalcOptPolicyActionMinMin(idx idxW);
+
+    /**
+     * @brief Optimize using transition weights and an inner successor minimum; outer action choice maximizes.
+     * @param idxW The weight index.
+     * @return True if a new policy is found.
+     */
+    bool CalcOptPolicyTransitionMinMax(idx idxW);
+
+    /**
+     * @brief Optimize using transition weights and an inner successor minimum; outer action choice minimizes.
+     * @param idxW The weight index.
+     * @return True if a new policy is found.
+     */
+    bool CalcOptPolicyTransitionMinMin(idx idxW);
+
+    /**
+     * @brief Optimize using action weights and an inner successor maximum; outer action choice maximizes.
+     * @param idxW The weight index.
+     * @return True if a new policy is found.
+     */
+    bool CalcOptPolicyActionMaxMax(idx idxW);
+
+    /**
+     * @brief Optimize using action weights and an inner successor maximum; outer action choice minimizes.
+     * @param idxW The weight index.
+     * @return True if a new policy is found.
+     */
+    bool CalcOptPolicyActionMaxMin(idx idxW);
+
+    /**
+     * @brief Optimize using transition weights and an inner successor maximum; outer action choice maximizes.
+     * @param idxW The weight index.
+     * @return True if a new policy is found.
+     */
+    bool CalcOptPolicyTransitionMaxMax(idx idxW);
+
+    /**
+     * @brief Optimize using transition weights and an inner successor maximum; outer action choice minimizes.
+     * @param idxW The weight index.
+     * @return True if a new policy is found.
+     */
+    bool CalcOptPolicyTransitionMaxMin(idx idxW);
+
+    /**
+     * @brief Evaluate the current policy using action weights \f$r(s,a)\f$.
+     * @param idxW The weight index.
+     */
+    void CalcPolicyActionWeight(idx idxW);
+
+    /** 
+     * @brief Evaluate the current policy using transition weights \f$r(s,a,s')\f$.
+     * @param idxW The weight index.
+     */
+    void CalcPolicyTransitionWeight(idx idxW);
+
+    /**
+     * @brief Evaluate the current policy using the second moment of action weights.
+     * @param idxW The weight index.
+     */
+    void CalcPolicyActionSecondMoment(idx idxW);
+
+    /**
+     * @brief Evaluate the current policy using the second moment of transition weights.
+     * @param idxW The weight index.
+     */
+    void CalcPolicyTransitionSecondMoment(idx idxW);
+
+    /**
+     * @brief Evaluate the current policy using the variance of action weights.
+     * @param idxW The weight index.
+     */
+    void CalcPolicyActionVariance(idx idxW);
+
+    /**
+     * @brief Evaluate the current policy using the variance of transition weights.
+     * @param idxW The weight index.
+     */
+    void CalcPolicyTransitionVariance(idx idxW);
+
+    /**
+     * @brief Evaluate the current policy using action-level average weights.
+     * @param idxW The weight index.
+     * @param g The average weight.
+     * @param idxDur The duration index.
+     */
+    void CalcPolicyActionAverageWeight(idx idxW, flt g, idx idxDur);
+
+    /**
+     * @brief Evaluate the current policy using action-level discounted weights.
+     * @param idxW The weight index.
+     * @param idxDur The duration index.
+     * @param discountF The discount factor.
+     */
+    void CalcPolicyActionDiscountedWeight(idx idxW, idx idxDur, flt discountF);
+
+    /** 
+     * @brief Evaluate the current policy using transition probabilities.
+     */
+    void CalcPolicyActionTransPr();
+
+    /**
+     * @brief Evaluate the current policy using discounted transition probabilities.
+     * @param idxDur The duration index.
+     * @param discountF The discount factor.
+     */
+    void CalcPolicyActionDiscountedTransPr(idx idxDur, flt discountF);
+
+    /**
+     * @brief Evaluate the current policy using action weights and an inner successor minimum.
+     * @param idxW The weight index.
+     */
+    void CalcPolicyMinActionWeight(idx idxW);
+
+    /**
+     * @brief Evaluate the current policy using transition weights and an inner successor minimum.
+     * @param idxW The weight index.
+     */
+    void CalcPolicyMinTransitionWeight(idx idxW);
+
+    /**
+     * @brief Evaluate the current policy using action weights and an inner successor maximum.
+     * @param idxW The weight index.
+     */
+    void CalcPolicyMaxActionWeight(idx idxW);
+
+    /**
+     * @brief Evaluate the current policy using transition weights and an inner successor maximum.
+     * @param idxW The weight index.
+     */
+    void CalcPolicyMaxTransitionWeight(idx idxW);
 };
 
 //-----------------------------------------------------------------------------
 
-/** Class for reading/loading HMDP models.
-
-The HMDP must be represented using the HMDP binary format (v1.0) which is a
-collection of 8 binary files:
-
-  Seven binary files are created using the following format:
-  - stateIdx.bin: File of integers containing the indexes defining all states in the format
-    "d0 s0 -1 d0 s0 a0 d1 s1 -1 d0 s0 a0 d1 s1 a1 d2 s2 -1 d0 s0 ...". Here -1 is
-    used to indicate that a new state is considered (new line).
-  - stateIdxLbl.bin: File of characters in the format "sIdx label sIdx label ..." Here
-    sIdx corresponds to the index/line number in stateIdxLbl.bin (index starts from 0).
-    Note no delimiter is used.
-  - actionIdx.bin: File of integers containing the indexes defining all actions in the format
-    "sIdx scope idx scope idx scope idx -1 sIdx scope idx scope idx -1 sIdx scope -1 ...".
-    sIdx corresponds to the index/line number in stateIdx.bin (index starts from 0).
-    Next pairs (scope idx) will follow indicating the possible transitions. Scope can be 4 values:
-    2 - A transition to a child process (stage zero in the child process), 1 - A transition
-    to next stage in the current process, 0 - A transition to the next stage in the father
-    process. Here idx in the pair denote the index of the state at the stage considered,
-    e.g. if scope=1 and idx=2 we consider state number 3 at next stage in the current
-    process. Finally, if scope = 3 then a transition to a state specified by it's state sIdx
-    is given. That is, if scope=3 and idx=5 then
-    we have a transition to the state specified at line 6 in stateIdxLbl.bin.
-    This is use full when considering shared child processes.
-  - actionIdxLbl.bin: File of characters in the format "aIdx label aIdx label ..." Here
-    aIdx corresponds to the index/line number in actionIdx.bin (index starts from 0).
-    Note no delimiter is used.
-  - actionWeight.bin: File of doubles containing the weights of the actions in the format
-    "c1 c2 c3 c1 c2 c3 ..." assuming three weights for each action.
-  - actionWeightLbl.bin: File of characters containing the labels of the
-    weights in the format "lable1 label2 label3" assuming three weights for each action.
-  - transProb.bin: File of doubles containing the probabilities of the transitions
-    defined in actions in actionIdx.bin. The format is
-    "p1 p2 p3 -1 p1 -1 p1 p2 -1 ...". Here -1 is
-    used to indicate that a new action is considered (new line).
-  - externalProcesses.bin: File of characters in the format "stageStr prefix stageStr prefix...".
-    Here stageStr corresponds to the index (e.g. n0 s0 a0 n1) of the stage corresponding to the
-    first stage in the external process and prefix to the prefix of the external process. Note no
-    delimiter is used.
-
-  Note
-  - The HMDP defined afterwards do not use the same state ids.
+/**
+ * @brief Class for reading/loading HMDP models.
+ *
+ * The HMDP must be represented using the HMDP binary format (v1.0) which is a
+ * collection of 8-10 binary files:
+ *
+ * - stateIdx.bin: File of integers containing the indexes defining all states.
+ * - stateIdxLbl.bin: File of characters containing state labels.
+ * - actionIdx.bin: File of integers containing the indexes defining all actions.
+ * - actionIdxLbl.bin: File of characters containing action labels.
+ * - actionWeight.bin: File of doubles containing the weights of the actions.
+ * - actionWeightLbl.bin: File of characters containing the labels of the weights.
+ * - transProb.bin: File of doubles containing transition probabilities.
+ * - externalProcesses.bin: File of characters containing external process info.
+ * - transWeight.bin: File of doubles containing transition-level weights.
+ * - transWeightLbl.bin: File of characters containing transition-level weight labels.
  */
 class HMDPReader
 {
 public:
+    friend class HMDPBuilder;
 
-    /** Default constructor. Do nothing. */
-    //HMDPReader():cpuTime(1) {};
+    /**
+     * @brief Create an empty reader used by in-memory builders.
+     */
+    HMDPReader();
 
-    /** Set the pointer to the hypergraph we want to read data to.
-     * \param stateIdxFile Filename of the state index file.
-     * \param stateIdxLblFile Filename of the state label file.
-     * \param actionIdxFile Filename of the action index file.
-     * \param actionIdxLblFile Filename of the action label file.
-     * \param actionWFile Filename of the action cost file.
-     * \param transProbFile Filename of the transition probability file.
-     * \param pHMPD Pointer to the HMDP.
+    /**
+     * @brief Set the pointer to the HMDP we want to read data to.
+     * @param stateIdxFile Filename of the state index file.
+     * @param stateIdxLblFile Filename of the state label file.
+     * @param actionIdxFile Filename of the action index file.
+     * @param actionIdxLblFile Filename of the action label file.
+     * @param actionWFile Filename of the action weight file.
+     * @param actionWLblFile Filename of the action weight label file.
+     * @param transProbFile Filename of the transition probability file.
+     * @param externalFile Filename of the external processes file.
+     * @param transWFile Filename of the transition-level weight file.
+     * @param transWLblFile Filename of the transition-level weight label file.
+     * @param pHMDP Pointer to the HMDP.
+     * @param hmdpLog Output stream for logging.
      */
     HMDPReader(string stateIdxFile, string stateIdxLblFile, string actionIdxFile,
         string actionIdxLblFile, string actionWFile, string actionWLblFile,
-        string transProbFile, string externalFile, HMDP *pHMDP, ostringstream & hmdpLog);
+        string transProbFile, string externalFile, string transWFile, string transWLblFile,
+        HMDP *pHMDP, ostringstream & hmdpLog);
 
 private:
 
-    /** Read a binary file of T's into an array of T's.
-        T could for instance be a float.
-     * \return The size of the array p.
+    /**
+     * @brief Read a binary file of type T into an array.
+     * @param file Filename.
+     * @param p Pointer to the array.
+     * @return The size of the array p.
      */
     template <class T>
     idx ReadBinary(string file, T *&p);
 
 
-    /** Add the states to the HMDP.
-     * \param stateIdxFile Filename of the state index file.
-     * \param stateIdxLblFile Filename of the state label file.
+    /**
+     * @brief Add the states to the HMDP.
+     * @param stateIdxFile Filename of the state index file.
+     * @param stateIdxLblFile Filename of the state label file.
      */
     void AddStates(string stateIdxFile, string stateIdxLblFile);
 
 
-    /** Add the actions to the HMDP.
-     * \param actionIdxFile Filename of the action index file.
-     * \param actionIdxLblFile Filename of the action label file.
-     * \param actionWFile Filename of the action cost file.
-     * \param transProbFile Filename of the transition probability file.
+    /**
+     * @brief Add the actions to the HMDP.
+     * @param actionIdxFile Filename of the action index file.
+     * @param actionIdxLblFile Filename of the action label file.
+     * @param actionWFile Filename of the action weight file.
+     * @param actionWLblFile Filename of the action weight label file.
+     * @param transProbFile Filename of the transition probability file.
+     * @param transWFile Filename of the transition-level weight file.
+     * @param transWLblFile Filename of the transition-level weight label file.
      */
     void AddActions(string actionIdxFile, string actionIdxLblFile,
-        string actionWFile, string actionWLblFile, string transProbFile);
+        string actionWFile, string actionWLblFile, string transProbFile,
+        string transWFile = "", string transWLblFile = "");
 
-    /** Add the external processes to the HMDP.
-     * Store stage idx and prefix in a map
-     * \param externalFile Filename of the external processes file.
+    /**
+     * @brief Add the external processes to the HMDP.
+     * @param externalFile Filename of the external processes file.
      */
     void AddExternal(string externalFile);
 
 
-    /** Add dummy states at founder level if infinite time-horizon HMDP.
+    /**
+     * @brief Compile the HMDP model.
+     *
+     * Adds dummy states at founder level if infinite time-horizon.
      */
     void Compile();
 
 
-    /** Find state id of transitions given index and scope of action to iState.
-     * State id is stored in the index vector of an TmpAction. The scope vector
-     * is cleared after (to reduce memory req.).
-     * \pre Changes the value of findValidOdr to true if finds a scope = 3.
+    /**
+     * @brief Find state id of transitions given index and scope.
+     *
+     * State id is stored in the index vector of a TmpAction.
+     *
+     * @param iState State index.
+     * @param findValidOdr Set to true if a scope 3 transition is found.
+     * @return True if all transition targets were resolved.
      */
-    void SetSIds(const idx & iState, bool & findValidOdr);
+    bool SetSIds(const idx & iState, bool & findValidOdr);
 
 
-    /** Find a valid ordering of the states in stateVec.
-     * \pre The seq. of order is a valid ordering.
+    /**
+     * @brief Find a valid ordering of the states.
+     * @param order Vector to store the ordering.
      */
     void FindValidOdr(vector<idx> & order);
 
 
-    /** Convert a state idx vector to a stage string. */
+    /**
+     * @brief Convert a state index vector to a stage string.
+     * @param iHMDP State index vector.
+     * @return The stage string.
+     */
     string StageStr(vector<idx> iHMDP) {
         string str;
         idx size = iHMDP.size();
@@ -1471,35 +2238,35 @@ public:
     bool okay;            ///< True if reading was okay.
 private:
 
-    bool foundScp3;       ///< True if found a scope 3 (a valid odr must be found).
+    bool foundScp3;       ///< True if found a scope 3 (a valid ordering must be found).
     multimap<string, int> stagesMap;   ///< Multimap to quickly find the different stages (state string -> sId).
 
-	class TmpAction {   // to store sId for actions loaded from the binary file
+    /** @brief Temporary action structure for loading. */
+	class TmpAction {
 	    public:
+        /** @brief Clear the action. */
         void Clear() {
             index.clear(); pr.clear(); scp.clear(); w.clear(); label.clear();
+            transW.clear();
         }
         idx sId;
         vector<idx> index;  ///< State indexes.
         vector<flt> pr;   ///< Transition probabilities.
-        vector<idx> scp;  ///< The scope of the index. If 1 next stage in current process, if 0 next stage in father process, if 2 next stage in child process (i.e. stage 0) and if 3 a transition to a state specified by it's state id. That is, if scope=3 and idx=5 then we have a transition to the state[5]..
-        vector<flt> w;    ///< Weights/quantities for the action.
+        vector<idx> scp;  ///< Scope of transition.
+        vector<flt> w;    ///< Action weights.
+        vector< vector<flt> > transW; ///< Transition-level weights.
         string label;     ///< Action label.
 	};
 
-	class TmpState {   // to store states loaded from the binary file
+    /** @brief Temporary state structure for loading. */
+	class TmpState {
 	    public:
-        //TmpState() {fStarSize=0;}
-//        void Clear() {
-//            iHMDP.clear(); actions.clear(); label.clear();
-//        }
         vector<idx> iHMDP;
         string label;
         vector<TmpAction> actions;
         vector< pair<idx,idx> > fStar;  ///< (iS,iA) pairs in the forward star.
-        //idx fStarSize;
 	};
-    vector<TmpState> stateVec;  ///< Vector of all states with stateVec[sId] according to file definitions.
+    vector<TmpState> stateVec;  ///< Vector of all states loaded from files.
 
     HMDP * pHMDP;         ///< Pointer to the HMDP.
     Timer timer;
@@ -1508,60 +2275,134 @@ private:
 
 // -----------------------------------------------------------------------------
 
-/** Class for saving the HMDP in memory to binary files.
+/**
+ * @brief Streaming builder for HMDP models stored directly in C++ memory.
+ *
+ * The builder accepts the same flat rows written by the R binary writer, but
+ * stores them in the temporary compiler structure instead of binary files.
+ */
+class HMDPBuilder
+{
+public:
+    /**
+     * @brief Create an in-memory HMDP builder.
+     * @param verbose_ Verbose output.
+     */
+    HMDPBuilder(bool verbose_);
 
- The log can be accessed using the log variable.
+    /**
+     * @brief Delete unfinished model memory.
+     */
+    ~HMDPBuilder();
+
+    /**
+     * @brief Set action-level weight names.
+     * @param labels Weight labels.
+     */
+    void SetWeights(vector<string> labels);
+
+    /**
+     * @brief Set transition-level weight names.
+     * @param labels Weight labels.
+     */
+    void SetTransWeights(vector<string> labels);
+
+    /**
+     * @brief Add one state row.
+     * @param index Hierarchical state index.
+     * @param label State label.
+     * @return Temporary state row id.
+     */
+    idx AddState(vector<idx> index, string label);
+
+    /**
+     * @brief Add one action row.
+     * @param stateRowId Temporary state row id where the action is defined.
+     * @param scope Transition scopes.
+     * @param id Transition ids.
+     * @param pr Transition probabilities.
+     * @param weights Action weights.
+     * @param transWeights Flat transition weights.
+     * @param label Action label.
+     */
+    void AddAction(idx stateRowId, vector<idx> scope, vector<idx> id,
+        vector<flt> pr, vector<flt> weights, vector<flt> transWeights,
+        string label);
+
+    /**
+     * @brief Compile and return the finished HMDP.
+     * @return Pointer to the finished HMDP.
+     */
+    HMDP* Close();
+
+    /**
+     * @brief Get builder log messages.
+     * @return Log text.
+     */
+    string GetLog();
+
+private:
+    HMDP *pHMDP;       ///< Model being built.
+    HMDPReader reader; ///< Temporary compiler state.
+    bool closed;       ///< True after Close has been called.
+    bool released;     ///< True after pHMDP ownership has been returned to R.
+};
+
+// -----------------------------------------------------------------------------
+
+/**
+ * @brief Class for saving the HMDP in memory to binary files.
  */
 class HMDPSave
 {
 public:
 
-    /** Set the pointer to the hypergraph we want to read data to.
-     * \param prefix Prefix used for the binary files.
-     * \param hmdp HMDP model.
+    /**
+     * @brief Constructor.
+     * @param prefix Prefix used for the binary files.
+     * @param pHMDP HMDP model.
      */
     HMDPSave(string prefix, HMDP * pHMDP);
 
-    /** Deconstructor. */
+    /**
+     * @brief Destructor.
+     */
     ~HMDPSave();
 
 private:
 
-    /** Write value to binary file. */
+    /** @brief Write vector of integers to binary file. */
     void WriteBinary(FILE* pFile, const vector<int> &vec) {
+        if (vec.empty()) return;
         fwrite(&vec[0], sizeof(int), vec.size(), pFile);
-        //cout << "W (v(int)): "; for(idx ii=0; ii < vec.size(); ii++) cout << vec[ii] << " " << flush; cout << endl;
     }
 
-    /** Write value to binary file. */
+    /** @brief Write vector of floats to binary file. */
     void WriteBinary(FILE* pFile, const vector<flt> &vec) {
+        if (vec.empty()) return;
         fwrite(&vec[0], sizeof(flt), vec.size(), pFile);
-        //cout << "W (v(flt)): "; for(idx ii=0; ii < vec.size(); ii++) cout << vec[ii] << " " << flush; cout << endl;
     }
 
-    /** Write value to binary file. */
+    /** @brief Write integer to binary file. */
     void WriteBinary(FILE* pFile, const int i) {
         fwrite(&i, sizeof(int), 1, pFile);
-        //cout << "W (int): " << i << flush; cout << endl;
     }
 
-    /** Write value to binary file. */
+    /** @brief Write float to binary file. */
     void WriteBinary(FILE* pFile, const flt i) {
         fwrite(&i, sizeof(flt), 1, pFile);
-        //cout << "W (flt): " << i << flush; cout << endl;
     }
 
-    /** Write value to binary file. */
+    /** @brief Write string to binary file. */
     void WriteBinary(FILE* pFile, const string &str) {
         fwrite(str.c_str(), sizeof(char), str.length()+1, pFile);   // add the null character also
-        //cout << "W (string): " << str << flush; cout << endl;
     }
 
-    /** Write the model to binary files. */
+    /** @brief Create and write the binary files. */
     void CreateBinaryFiles();
 
 public:
-    ostringstream log;
+    ostringstream log;    ///< Logging stream.
 private:
     FILE* pStateIdxFile;
     FILE* pStateIdxLblFile;
@@ -1570,13 +2411,15 @@ private:
     FILE* pActionWFile;
     FILE* pActionWLblFile;
     FILE* pTransProbFile;
+    FILE* pTransWFile;
+    FILE* pTransWLblFile;
     FILE* pExternalProcessesFile;
 
     HMDP * pHMDP;         ///< Pointer to the HMDP.
 	int sId; ///< Total number of states.
 	int aId; ///< Total number of actions.
-	int wLblLth; ///< Number of weight labels
-    Timer timer; ///< Cpu measurement
+	int wLblLth; ///< Number of weight labels.
+    Timer timer; ///< CPU measurement timer.
 };
 
 

@@ -33,22 +33,22 @@ library(dplyr)
 ## ---------------------------------------------------------------------------------------
 library(MDP2)
 
-## ---- par=TRUE--------------------------------------------------------------------------
+## ----par=TRUE---------------------------------------------------------------------------
 prefix <- paste0(system.file("models", package = "MDP2"), "/machine1_")
 mdp <- loadMDP(prefix)
 getInfo(mdp, withList = F, dfLevel = "action", asStringsActions = TRUE)  
 
-## ---- par=TRUE--------------------------------------------------------------------------
-plot(mdp, hyperarcColor = "label", radx = 0.06, marX = 0.065, marY = 0.055)
+## ----par=TRUE---------------------------------------------------------------------------
+plot(mdp, actionColor = "label", radx = 0.06, marX = 0.065, marY = 0.055)
 
 ## ----solve3-----------------------------------------------------------------------------
 scrapValues <- c(30, 10, 5, 0)   # scrap values (the values of the 4 states at the last stage)
 runValueIte(mdp, "Net reward", termValues = scrapValues)
 
-## ---- par=TRUE--------------------------------------------------------------------------
+## ----par=TRUE---------------------------------------------------------------------------
 pol <- getPolicy(mdp)
 tail(pol)
-plot(mdp, hyperarcShow = "policy", nodeLabel = "weight", 
+plot(mdp, actionsVisible = "policy", stateLabel = "weight", 
      radx = 0.06, marX = 0.065, marY = 0.055)
 
 ## ----Set policy (machine rep),echo=TRUE,eval=TRUE---------------------------------------

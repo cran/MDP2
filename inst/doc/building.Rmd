@@ -127,12 +127,12 @@ until next decision epoch are $\tau(i,a) = 1, 0\leq i < N$ and $\tau(N,a) = 2$.
 Assume that the number of possible working conditions equals $N=5$, i.e. the number of states are:
 
 ```{r states}
-N <- 5
-states <- tibble::tibble(
-      idx = 1:N - 1,
-      label = paste0("i = ", 1:N)
-   )
-states
+   N <- 5
+   states <- tibble::tibble(
+         idx = 1:N - 1,
+         label = paste0("i = ", 1:N)
+      )
+   states
 ```
 
 Note each state are given an index and are always numbered from zero. The repair costs (negative numbers since the MDP optimize based on rewards) are: 
@@ -223,7 +223,7 @@ w$closeWriter() # close the binary files
 
 ```{r semi-mdp, echo=FALSE, results='hide', message=FALSE, fig.cap="Figure 1: The state-expanded hypergraph for the semi-MDP.", par=TRUE}
 mdp<-loadMDP("hct611-1_")
-plot(mdp, hyperarcColor = "label", marY = 0.06)
+plot(mdp, actionColor = "label", marY = 0.06)
 ```
 
 
@@ -411,7 +411,7 @@ its lifetime.
 ```{r plotHgf3, echo=FALSE, fig.cap="Figure 2: A finite-horizon MDP", par=TRUE}
 scrapValues <- c(30, 10, 5, 0)   # scrap values (the values of the 4 states at stage 4)
 mdp <- loadMDP("machine1_", getLog = FALSE)
-plot(mdp, hyperarcColor = "label", radx = 0.06, marX = 0.065, marY = 0.055, nodeLabel = "sIdx:label")
+plot(mdp, actionColor = "label", radx = 0.06, marX = 0.065, marY = 0.055, stateLabel = "sIdx|label")
 ```
 
 

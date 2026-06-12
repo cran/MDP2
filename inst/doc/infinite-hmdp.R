@@ -33,10 +33,10 @@ library(dplyr)
 ## ---------------------------------------------------------------------------------------
 library(MDP2)
 
-## ---- echo=FALSE, fig.cap="The state-expanded hypergraph of the first stage of a hierarchical MDP. Level 0 indicate the founder level, and the nodes indicates states at the different levels. A child process (oval box) is represented using its state-expanded hypergraph (hyperarcs not shown) and is uniquely defined by a given state and action of its parent process."----
+## ----echo=FALSE, fig.cap="The state-expanded hypergraph of the first stage of a hierarchical MDP. Level 0 indicate the founder level, and the nodes indicates states at the different levels. A child process (oval box) is represented using its state-expanded hypergraph (hyperarcs not shown) and is uniquely defined by a given state and action of its parent process."----
 knitr::include_graphics("vignette_files/hmdp_index.png")
 
-## ---- par=TRUE--------------------------------------------------------------------------
+## ----par=TRUE---------------------------------------------------------------------------
 prefix <- paste0(system.file("models", package = "MDP2"), "/cow_")
 mdp <- loadMDP(prefix)
 mdp 
@@ -105,10 +105,10 @@ hgf$hyperarcs <- right_join(hgf$hyperarcs, getPolicy(mdp), by = c("sId", "aIdx")
 plotHypergraph(hgf, gridDim = c(14, 7), cex = 0.8, radx = 0.02, rady = 0.03)
 
 ## ----eval=FALSE, include=FALSE----------------------------------------------------------
-#  # getPolicy(mdp)
-#  # rpo<-calcRPO(mdp, wLbl, iA=rep(0,42), criterion="discount", dur=durLbl, rate=rate, rateBase=rateBase)
-#  # policy<-merge(policy,rpo)
-#  # policy
+# # getPolicy(mdp)
+# # rpo<-calcRPO(mdp, wLbl, iA=rep(0,42), criterion="discount", dur=durLbl, rate=rate, rateBase=rateBase)
+# # policy<-merge(policy,rpo)
+# # policy
 
 ## ----avePerLac, tidy.opts=list(comment=FALSE)-------------------------------------------
 wLbl<-"Net reward"         # the weight we want to optimize (net reward)
@@ -116,7 +116,7 @@ durLbl<-"Duration"         # the duration/time label
 runPolicyIteAve(mdp, wLbl, durLbl)
 getPolicy(mdp)
 
-## ---- echo=TRUE-------------------------------------------------------------------------
+## ----echo=TRUE--------------------------------------------------------------------------
 runCalcWeights(mdp, w=wLbl, criterion="average", dur = "Yield")
 
 ## ----Reward/piglet (sow rep), echo=TRUE-------------------------------------------------

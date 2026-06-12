@@ -57,17 +57,17 @@ mdp
 getInfo(mdp, withList = F, dfLevel = "action", asStringsActions = TRUE)  
 
 ## ----plotHgf, par=TRUE------------------------------------------------------------------
-plot(mdp, hyperarcColor = "label", nodeLabel = "sId:label")
+plot(mdp, actionColor = "label", stateLabel = "sId|label")
 
 ## ----solve1_ave, par=TRUE---------------------------------------------------------------
 runPolicyIteAve(mdp,"Net reward","Duration")
 getPolicy(mdp)
-plot(mdp, hyperarcShow = "policy")
+plot(mdp, actionsVisible = "policy")
 
-## ---- par=TRUE--------------------------------------------------------------------------
+## ----par=TRUE---------------------------------------------------------------------------
 runPolicyIteDiscount(mdp,"Net reward","Duration", discountFactor = 0.5)
 getPolicy(mdp)
-plot(mdp, hyperarcShow = "policy")
+plot(mdp, actionsVisible = "policy")
 
 ## ---------------------------------------------------------------------------------------
 runValueIte(mdp,"Net reward","Duration", discountFactor = 0.5, eps = 1e-10, maxIte = 1000)

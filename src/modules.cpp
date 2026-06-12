@@ -1,70 +1,58 @@
-#include <Rcpp.h>
+// [[Rcpp::depends(RcppArmadillo)]]
+#include <RcppArmadillo.h>
 #include "hmdp.h"
 
 using namespace Rcpp;
 
-/** Function to call ValueIte since Rcpp cannot handle enum types. */
-void RunValueIte(HMDP* hmdp, idx crit, idx maxIte, flt epsilon, const idx idxW,
+// Convert the integer R API Bellman-operator code to a Bellman operator.
+inline HMDP::BellmanOp ToBellmanOp(idx op) {
+   if (op > 8) throw std::runtime_error("Invalid Bellman operator.");
+   return static_cast<HMDP::BellmanOp>(op);
+}
+
+// Convert the integer R API optimization-sense code to an optimization sense.
+HMDP::OptSense ToOptSense(idx sense) {
+   switch (sense) {
+      case 0: return HMDP::OptSense::Maximize;
+      case 1: return HMDP::OptSense::Minimize;
+      default: throw std::runtime_error("Invalid optimization sense.");
+   }
+}
+
+// Function to call ValueIte since Rcpp cannot handle enum types.
+void RunValueIte(HMDP* hmdp, idx op, idx sense, idx maxIte, flt epsilon, const idx idxW,
               const idx idxDur, vector<flt> & termValues,
               const flt g, const flt discountF)
 {
-   if (crit==0)
-      return hmdp->ValueIte(HMDP::DiscountedReward, maxIte, epsilon, idxW, idxDur, termValues, g, discountF);
-   if (crit==1)
-      return hmdp->ValueIte(HMDP::AverageReward, maxIte, epsilon, idxW, idxDur, termValues, g, discountF);
-   if (crit==2)
-      return hmdp->ValueIte(HMDP::Reward, maxIte, epsilon, idxW, idxDur, termValues, g, discountF);
-   if (crit==3)
-      return hmdp->ValueIte(HMDP::TransPr, maxIte, epsilon, idxW, idxDur, termValues, g, discountF);
-   if (crit==4)
-      return hmdp->ValueIte(HMDP::TransPrDiscounted, maxIte, epsilon, idxW, idxDur, termValues, g, discountF);
+   hmdp->ValueIte(ToBellmanOp(op), ToOptSense(sense), maxIte, epsilon, idxW, idxDur, termValues, g, discountF);
 }
 
-/** Function to call PolicyIte since Rcpp cannot handle enum types. */
-flt RunPolicyIte(HMDP* hmdp, idx crit, uSInt maxIte, const idx idxW, const idx idxD, const flt discountF)
+// Function to call PolicyIte since Rcpp cannot handle enum types.
+flt RunPolicyIte(HMDP* hmdp, idx op, idx sense, uSInt maxIte, const idx idxW, const idx idxD, const flt discountF)
 {
-   if (crit==0)
-      return hmdp->PolicyIte(HMDP::DiscountedReward, maxIte, idxW, idxD, discountF);
-   if (crit==1)
-      return hmdp->PolicyIte(HMDP::AverageReward, maxIte, idxW, idxD, discountF);
-   return hmdp->PolicyIte(HMDP::Reward, maxIte, idxW, idxD, discountF);
+   return hmdp->PolicyIte(ToBellmanOp(op), ToOptSense(sense), maxIte, idxW, idxD, discountF);
 }
 
 
-/** Function to call PolicyIteFixedPolicy since Rcpp cannot handle enum types. */
-flt RunPolicyIteFixedPolicy(HMDP* hmdp, idx crit, const idx idxW, const idx idxD, const flt discountF)
+// Function to call PolicyIteFixedPolicy since Rcpp cannot handle enum types.
+flt RunPolicyIteFixedPolicy(HMDP* hmdp, idx op, const idx idxW, const idx idxD, const flt discountF)
 {
-   if (crit==1)
-      return hmdp->PolicyIteFixedPolicy(HMDP::DiscountedReward, idxW, idxD, discountF);
-   if (crit==0)
-      return hmdp->PolicyIteFixedPolicy(HMDP::AverageReward, idxW, idxD, discountF);
-   return -INF;
+   return hmdp->PolicyIteFixedPolicy(ToBellmanOp(op), idxW, idxD, discountF);
 }
 
-/** Function to call since Rcpp cannot handle enum types. */
-void RunCalcPolicy(HMDP* hmdp, idx crit, idx idxW, flt g, idx idxD, flt discountF)
+// Function to call since Rcpp cannot handle enum types.
+void RunCalcPolicy(HMDP* hmdp, idx op, idx idxW, flt g, idx idxD, flt discountF)
 {
-   if (crit==0)
-      return hmdp->CalcPolicy(HMDP::AverageReward, idxW, 0, idxD);
-   if (crit==1)
-      return hmdp->CalcPolicy(HMDP::DiscountedReward, idxW, 0, idxD, discountF);
-   if (crit==2)
-      return hmdp->CalcPolicy(HMDP::Reward, idxW);
+   hmdp->CalcPolicy(ToBellmanOp(op), idxW, g, idxD, discountF);
 }
 
 
 
-/** Function to call since Rcpp cannot handle enum types. */
-vector<flt> RunCalcRPO(HMDP* hmdp, idx crit, vector<idx> & iS, idx idxW, vector<idx> & idxA, flt g, 
-                idx idxDur, flt discountF) 
+// Function to call since Rcpp cannot handle enum types.
+vector<flt> RunCalcRPO(HMDP* hmdp, idx op, idx sense, vector<idx> & iS, idx idxW, vector<idx> & idxA, flt g,
+                idx idxDur, flt discountF)
 {
-   if (crit==0)
-      return hmdp->CalcRPO(HMDP::AverageReward, iS, idxW, idxA, g, idxDur, discountF);
-   if (crit==1)
-      return hmdp->CalcRPO(HMDP::DiscountedReward, iS, idxW, idxA, 0, idxDur, discountF);
-   if (crit==2)
-      return hmdp->CalcRPO(HMDP::Reward, iS, idxW, idxA);
-   return vector<flt>();
+   return hmdp->CalcRPO(ToBellmanOp(op), ToOptSense(sense), iS, idxW, idxA, g, idxDur, discountF);
 }
 
 
@@ -74,7 +62,7 @@ idx GetActionSize(HMDP* hmdp) {return hmdp->GetActionSize();}
 
 string GetNextStageStr(HMDP* hmdp, string stageStr) {return hmdp->GetNextStageStr(stageStr);}
 
-/** Get state ids of a vector of stage strings. */
+// Get state ids of a vector of stage strings.
 vector<idx> GetStateIdsStages(HMDP* hmdp, vector<string> stages) {
    vector<idx> v;
    for (idx i=0; i<stages.size(); ++i) {
@@ -85,7 +73,7 @@ vector<idx> GetStateIdsStages(HMDP* hmdp, vector<string> stages) {
 }
 
 
-/** Get state ids of a vector of state strings. */
+// Get state ids of a vector of state strings.
 vector<idx> GetStateIdsStates(HMDP* hmdp, vector<string> states) {
    vector<idx> v;
    for (idx i=0; i<states.size(); ++i) {
@@ -95,13 +83,13 @@ vector<idx> GetStateIdsStates(HMDP* hmdp, vector<string> states) {
 }
 
 
-/** Get the state string of a state given sId. */
+// Get the state string of a state given sId.
 vector<string> GetStateStr(HMDP* hmdp, vector<idx> sId) {
    return hmdp->GetStatesStr(sId);
 }
 
 
-/** Get info of actions of a state as a List. */
+// Get info of actions of a state as a List.
 List GetActionInfo(HMDP* hmdp, idx sId) {
    HMDP::state_iterator iteS = hmdp->GetIte(sId);
    List lst;
@@ -111,6 +99,7 @@ List GetActionInfo(HMDP* hmdp, idx sId) {
       tmp["aIdx"] = hmdp->GetIdx(iteS,iteA);
       tmp["label"] = iteA->GetLabel();
       tmp["weights"] = iteA->GetW();
+      tmp["transWeights"] = iteA->GetTransW();
       tmp["trans"] = iteA->GetTransIds();
       tmp["pr"] = iteA->GetTransPr();
       lst.push_back(tmp);
@@ -133,6 +122,8 @@ RCPP_MODULE(HMDPModule){
    .field_readonly("okay", &HMDP::okay)
    .field_readonly("levels", &HMDP::levels)
    .field_readonly("wNames", &HMDP::weightNames)
+   .field_readonly("wActionNames", &HMDP::weightActionNames)
+   .field_readonly("wTransNames", &HMDP::weightTransNames)
    .field_readonly("externalProc", &HMDP::externalProc)
    .field("verbose", &HMDP::verbose)
 
@@ -150,6 +141,8 @@ RCPP_MODULE(HMDPModule){
    .method("getExternalInfo", &HMDP::GetExternalInfo)
    .method("getActionSize", GetActionSize)
    .method("getActionInfo", GetActionInfo)
+   .method("getActionWNames", &HMDP::GetActionWNames)
+   .method("getTransWNames", &HMDP::GetTransWNames)
    .method("getIds", &HMDP::GetIds)
    .method("getStateIdsStages", GetStateIdsStages)
    .method("getStateIdsStates", GetStateIdsStates)
@@ -159,6 +152,19 @@ RCPP_MODULE(HMDPModule){
    .method("getStateLabel", &HMDP::GetStateLabel)
    .method("getPolicyW", &HMDP::GetPolicyW)
    .method("setPolicy", &HMDP::SetPolicy)
+   .method("setTerminalW", &HMDP::SetTerminalW)
    .method("save2Binary", &HMDP::Save2Binary)
+   ;
+
+   class_<HMDPBuilder>( "HMDPBuilder" )
+
+   .constructor<bool>("Create an in-memory HMDP builder.")
+
+   .method("setWeights", &HMDPBuilder::SetWeights)
+   .method("setTransWeights", &HMDPBuilder::SetTransWeights)
+   .method("addState", &HMDPBuilder::AddState)
+   .method("addAction", &HMDPBuilder::AddAction)
+   .method("close", &HMDPBuilder::Close)
+   .method("getLog", &HMDPBuilder::GetLog)
    ;
 }
