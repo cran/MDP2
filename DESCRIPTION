@@ -1,7 +1,7 @@
 Type: Package
 Package: MDP2
 Title: Markov Decision Processes (MDPs)
-Version: 2.2.2.0
+Version: 3.0.0
 Authors@R: c(
     person("Lars", "Relund Nielsen", , "lars@relund.dk", role = c("aut", "cre"),
            comment = c(ORCID = "0000-0002-4802-3071")))
@@ -27,6 +27,6 @@ Language: en-US
 Config/roxygen2/version: 8.0.0
 Config/testthat/edition: 3
 NeedsCompilation: yes
-Packaged: 2026-06-04 09:51:52 UTC; au15463
+Packaged: 2026-06-22 07:57:05 UTC; au15463
 Repository: CRAN
-Date/Publication: 2026-06-12 19:30:14 UTC
+Date/Publication: 2026-06-22 08:10:07 UTC
